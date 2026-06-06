@@ -2,6 +2,8 @@
 
 A command-line tool written in Rust for editing Jupyter notebooks (`.ipynb`) from the terminal. Manipulate individual cells or ranges without opening a GUI.
 
+> Also available as an **[opencode](https://opencode.ai) skill** — lets AI agents read, create, edit, delete and move notebook cells directly from a coding session. See [Use as an opencode skill](#use-as-an-opencode-skill).
+
 ---
 
 ## Overview
@@ -208,7 +210,7 @@ Cells:     12  (9 code, 2 markdown, 1 raw)
 ### From source
 
 ```sh
-git clone https://github.com/youruser/notebook-editor
+git clone https://github.com/MyNameIsDotPy/notebook-editor
 cd notebook-editor
 cargo build --release
 # Binary at: ./target/release/nbedit
@@ -217,7 +219,23 @@ cargo build --release
 ### Cargo
 
 ```sh
-cargo install notebook-editor
+cargo install --git https://github.com/MyNameIsDotPy/notebook-editor
+```
+
+### Pre-built binaries
+
+Download the latest binary for your platform from the [Releases](https://github.com/MyNameIsDotPy/notebook-editor/releases) page:
+
+| File | Platform |
+|---|---|
+| `nbedit-linux-x86_64` | Linux x86_64 (Ubuntu, Arch, Debian, …) |
+| `nbedit-linux-aarch64` | Linux ARM64 |
+| `nbedit-windows-x86_64.exe` | Windows x86_64 |
+
+```sh
+# Linux example
+chmod +x nbedit-linux-x86_64
+sudo mv nbedit-linux-x86_64 /usr/local/bin/nbedit
 ```
 
 ---
@@ -294,6 +312,45 @@ nbedit create report.ipynb --at 5 --type markdown --source "---"
 # Show notebook summary
 nbedit info report.ipynb
 ```
+
+---
+
+## Use as an opencode skill
+
+`nbedit` ships with an [opencode](https://opencode.ai) skill that teaches AI agents how to use the tool. When the skill is active, the agent can autonomously read, create, edit, delete and move notebook cells as part of a larger coding task — without needing to re-read the docs.
+
+### Install the skill
+
+The skill file is included in this repository at `.opencode/skills/nbedit/SKILL.md`. If you cloned the repo it is already available inside your project.
+
+To make it available **globally** across all your projects, copy it to your opencode global skills directory:
+
+```sh
+mkdir -p ~/.config/opencode/skills/nbedit
+cp .opencode/skills/nbedit/SKILL.md ~/.config/opencode/skills/nbedit/SKILL.md
+```
+
+Or point opencode at this repo's skill directory by adding the following to your `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "skills": {
+    "paths": ["/path/to/notebook-editor/.opencode/skills"]
+  }
+}
+```
+
+### How it works
+
+Once the skill is loaded, opencode will automatically activate it whenever you ask something like:
+
+- *"Read cells 2 to 5 from report.ipynb"*
+- *"Delete the last cell"*
+- *"Add a markdown cell before cell 3"*
+- *"Move cells 4-6 to the end"*
+
+The skill documents every subcommand, flag, selection syntax, exit codes and the source layout — giving the agent everything it needs to use `nbedit` correctly without guessing.
 
 ---
 
