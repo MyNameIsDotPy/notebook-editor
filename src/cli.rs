@@ -124,6 +124,27 @@ pub enum Command {
         /// Path to the notebook file
         notebook: String,
     },
+
+    /// Search for a pattern (regex) across cell sources
+    Search {
+        /// Path to the notebook file
+        notebook: String,
+
+        /// Pattern to search for (regular expression)
+        pattern: String,
+
+        /// Filter by cell type
+        #[arg(long, value_enum)]
+        r#type: Option<CellTypeFilter>,
+
+        /// Print the full source of each matching cell (non-matching lines indented)
+        #[arg(long)]
+        show_source: bool,
+
+        /// Case-insensitive matching
+        #[arg(short = 'i', long)]
+        ignore_case: bool,
+    },
 }
 
 #[derive(Clone, ValueEnum)]

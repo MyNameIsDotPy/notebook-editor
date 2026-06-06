@@ -173,6 +173,39 @@ nbedit move analysis.ipynb 3-5 --to last
 
 ---
 
+### `search` — search with regex
+
+```sh
+nbedit search <NOTEBOOK> <PATTERN> [OPTIONS]
+```
+
+| Option            | Description                                           |
+|-------------------|-------------------------------------------------------|
+| `--type`          | Filter: `code`, `markdown`, `raw`                     |
+| `--show-source`   | Print full source of each matching cell               |
+| `-i/--ignore-case`| Case-insensitive matching                             |
+
+Matching lines are prefixed with `>`. Exits with code `1` if no matches found.
+
+```sh
+# Plain text
+nbedit search analysis.ipynb "pandas"
+
+# Regex: all function definitions
+nbedit search analysis.ipynb "def \w+\("
+
+# Case-insensitive
+nbedit search analysis.ipynb "todo" -i
+
+# Only code cells, full source context
+nbedit search analysis.ipynb "TODO" --type code --show-source
+
+# Lines starting with a comment
+nbedit search analysis.ipynb "^#"
+```
+
+---
+
 ## Global flags
 
 | Flag        | Description                                         |
@@ -216,9 +249,10 @@ src/
     delete.rs
     move.rs
     info.rs
+    search.rs      regex search via the `regex` crate
 ```
 
-Key crates: `clap 4` (derive), `serde`/`serde_json`, `anyhow`, `tempfile`.
+Key crates: `clap 4` (derive), `serde`/`serde_json`, `anyhow`, `tempfile`, `regex`.
 
 ---
 
@@ -228,4 +262,4 @@ Key crates: `clap 4` (derive), `serde`/`serde_json`, `anyhow`, `tempfile`.
 cargo test
 ```
 
-8 unit tests live in `src/selection.rs` covering all selection expression forms.
+12 unit tests: 8 in `src/selection.rs` (selection expressions) and 4 in `src/commands/search.rs` (regex patterns).

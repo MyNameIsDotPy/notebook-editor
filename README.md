@@ -193,6 +193,55 @@ Cells:     12  (9 code, 2 markdown, 1 raw)
 
 ---
 
+### Search
+
+Search for a pattern across all cell sources. Supports full regular expressions.
+
+```
+nbedit search <NOTEBOOK> <PATTERN> [OPTIONS]
+```
+
+**Options**
+
+| Option | Description |
+|---|---|
+| `--type` | Filter by cell type: `code`, `markdown`, `raw` |
+| `--show-source` | Print the full source of each matching cell |
+| `-i / --ignore-case` | Case-insensitive matching |
+
+**Output format**
+
+Matching lines are prefixed with `>`. Non-matching lines are shown only when `--show-source` is used:
+
+```
+[Cell 3 | code]
+   1 > import pandas as pd
+   3 > import numpy as np
+```
+
+**Examples**
+
+```sh
+# Plain text search
+nbedit search analysis.ipynb "pandas"
+
+# Regex: find all function definitions
+nbedit search analysis.ipynb "def \w+\("
+
+# Case-insensitive
+nbedit search analysis.ipynb "todo" -i
+
+# Only in code cells, show full source context
+nbedit search analysis.ipynb "TODO" --type code --show-source
+
+# Lines starting with a comment
+nbedit search analysis.ipynb "^#"
+```
+
+Exits with code `1` if no matches are found.
+
+---
+
 ## Global Flags
 
 | Flag | Description |

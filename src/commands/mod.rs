@@ -4,6 +4,7 @@ pub mod edit;
 pub mod info;
 pub mod read;
 pub mod r#move;
+pub mod search;
 
 use anyhow::Result;
 use crate::cli::{Cli, Command};
@@ -71,5 +72,19 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         } => r#move::run(&notebook, &selection, &to, cli.backup, cli.quiet),
 
         Command::Info { notebook } => info::run(&notebook),
+
+        Command::Search {
+            notebook,
+            pattern,
+            r#type,
+            show_source,
+            ignore_case,
+        } => search::run(
+            &notebook,
+            &pattern,
+            r#type.as_ref().map(|t| t.as_str()),
+            show_source,
+            ignore_case,
+        ),
     }
 }
