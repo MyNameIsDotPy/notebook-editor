@@ -1,6 +1,6 @@
 ---
 name: nbedit
-description: Use when the user asks about nbedit, how to read/edit/create/delete/move cells in a Jupyter notebook from the CLI, or how to use notebook-editor. Covers all nbedit subcommands (read, create, edit, delete, move, info), cell selection syntax, flags, and build/install instructions.
+description: Use when the user asks about nbedit, how to read/edit/create/delete/move/search/replace cells in a Jupyter notebook from the CLI, or how to use notebook-editor. Covers all nbedit subcommands (read, create, edit, delete, move, info, search, replace), --lines flag for line-level read/edit, regex search and replace with capture groups, cell selection syntax, flags, and build/install instructions.
 ---
 
 # nbedit — notebook-editor skill
