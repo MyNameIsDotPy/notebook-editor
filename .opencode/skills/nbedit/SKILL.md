@@ -77,6 +77,7 @@ nbedit read <NOTEBOOK> <SELECTION> [OPTIONS]
 | `--type`         | Filter: `code`, `markdown`, `raw`                |
 | `--show-outputs` | Also print cell outputs (code cells only)        |
 | `--json`         | Emit the full cell JSON instead of plain source  |
+| `--lines <EXPR>` | Print only specific lines within each cell       |
 
 ```sh
 nbedit read analysis.ipynb 3
@@ -86,6 +87,12 @@ nbedit read analysis.ipynb all
 nbedit read analysis.ipynb all --type markdown
 nbedit read analysis.ipynb 1 --show-outputs
 nbedit read analysis.ipynb 2 --json
+
+# Lines 2 to 5 of cell 3
+nbedit read analysis.ipynb 3 --lines 2-5
+
+# Lines 1 and 7 of cell 1
+nbedit read analysis.ipynb 1 --lines 1,7
 ```
 
 ---
@@ -124,18 +131,25 @@ nbedit edit <NOTEBOOK> <INDEX> [OPTIONS]
 
 `<INDEX>` must be a single cell number.
 
-| Option          | Description                              |
-|-----------------|------------------------------------------|
-| `--source <S>`  | Replace source with inline text          |
-| `--file <PATH>` | Replace source with file contents        |
-| `--editor`      | Open the cell in `$EDITOR` (default: vi) |
-| `--type`        | Change the cell type                     |
+| Option           | Description                              |
+|------------------|------------------------------------------|
+| `--source <S>`   | Replace source with inline text          |
+| `--file <PATH>`  | Replace source with file contents        |
+| `--editor`       | Open the cell in `$EDITOR` (default: vi) |
+| `--type`         | Change the cell type                     |
+| `--lines <EXPR>` | Replace only specific lines within the cell |
 
 ```sh
 nbedit edit analysis.ipynb 4 --source "x = 42"
 nbedit edit analysis.ipynb 4 --file updated.py
 nbedit edit analysis.ipynb 4 --editor
 nbedit edit analysis.ipynb 4 --type markdown
+
+# Replace only line 3 of cell 4
+nbedit edit analysis.ipynb 4 --lines 3 --source "x = 99"
+
+# Replace lines 2-4 of cell 1
+nbedit edit analysis.ipynb 1 --lines 2-4 --source "# rewritten"
 ```
 
 ---
@@ -206,6 +220,41 @@ nbedit search analysis.ipynb "^#"
 
 ---
 
+### `replace` — find and replace with regex
+
+```sh
+nbedit replace <NOTEBOOK> <SELECTION> <PATTERN> <REPLACEMENT>
+```
+
+| Option             | Description                                      |
+|--------------------|--------------------------------------------------|
+| `--type`           | Filter: `code`, `markdown`, `raw`                |
+| `-i/--ignore-case` | Case-insensitive matching                        |
+| `--dry-run`        | Preview changes without modifying the file       |
+
+Replacement string supports capture groups: `$1`, `$2`, …
+
+```sh
+# Simple replacement in all cells
+nbedit replace analysis.ipynb all "foo" "bar"
+
+# Case-insensitive
+nbedit replace analysis.ipynb all "todo" "DONE" -i
+
+# Rename a function using capture group
+nbedit replace analysis.ipynb all "def (\w+)\(" "def new_$1("
+
+# Preview before writing
+nbedit replace analysis.ipynb all "old_api" "new_api" --dry-run
+
+# Only code cells
+nbedit replace analysis.ipynb 1,3-5 "import numpy" "import numpy as np" --type code
+```
+
+Exits with code `1` if no matches found.
+
+---
+
 ## Global flags
 
 | Flag        | Description                                         |
@@ -243,13 +292,14 @@ src/
   error.rs         NbError enum
   commands/
     mod.rs         dispatch()
-    read.rs
+    read.rs        supports --lines
     create.rs
-    edit.rs        includes $EDITOR support via tempfile
+    edit.rs        includes $EDITOR support, --lines for line-level edits
     delete.rs
     move.rs
     info.rs
     search.rs      regex search via the `regex` crate
+    replace.rs     regex find & replace with capture group support
 ```
 
 Key crates: `clap 4` (derive), `serde`/`serde_json`, `anyhow`, `tempfile`, `regex`.
@@ -262,4 +312,4 @@ Key crates: `clap 4` (derive), `serde`/`serde_json`, `anyhow`, `tempfile`, `rege
 cargo test
 ```
 
-12 unit tests: 8 in `src/selection.rs` (selection expressions) and 4 in `src/commands/search.rs` (regex patterns).
+16 unit tests: 8 in `src/selection.rs`, 4 in `src/commands/search.rs`, 4 in `src/commands/replace.rs`.

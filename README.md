@@ -64,6 +64,17 @@ Optional flags:
 | `--type` | Filter by cell type: `code`, `markdown`, `raw` |
 | `--show-outputs` | Also print cell outputs (code cells only) |
 | `--json` | Emit the full cell JSON instead of plain source |
+| `--lines <EXPR>` | Print only specific lines within each cell (same selection syntax) |
+
+**Reading specific lines of a cell**
+
+```sh
+# Lines 2 to 4 of cell 3
+nbedit read analysis.ipynb 3 --lines 2-4
+
+# Lines 1, 5 and 7 of cell 1
+nbedit read analysis.ipynb 1 --lines 1,5,7
+```
 
 ---
 
@@ -117,6 +128,7 @@ The index must be a single cell (not a range).
 | `--file <PATH>` | Replace source with file contents |
 | `--editor` | Open the cell in `$EDITOR` (default: `vi`) |
 | `--type <TYPE>` | Change the cell type |
+| `--lines <EXPR>` | Replace only specific lines within the cell |
 
 **Examples**
 
@@ -124,6 +136,12 @@ The index must be a single cell (not a range).
 nbedit edit analysis.ipynb 4 --source "x = 42"
 nbedit edit analysis.ipynb 4 --file updated.py
 nbedit edit analysis.ipynb 4 --editor
+
+# Replace line 3 of cell 4
+nbedit edit analysis.ipynb 4 --lines 3 --source "x = 99"
+
+# Replace lines 2 to 4 with new content
+nbedit edit analysis.ipynb 4 --lines 2-4 --source "# rewritten"
 ```
 
 ---
@@ -236,6 +254,47 @@ nbedit search analysis.ipynb "TODO" --type code --show-source
 
 # Lines starting with a comment
 nbedit search analysis.ipynb "^#"
+```
+
+Exits with code `1` if no matches are found.
+
+---
+
+### Replace
+
+Find and replace text using regular expressions across one or more cells.
+
+```
+nbedit replace <NOTEBOOK> <SELECTION> <PATTERN> <REPLACEMENT>
+```
+
+**Options**
+
+| Option | Description |
+|---|---|
+| `--type` | Filter by cell type: `code`, `markdown`, `raw` |
+| `-i / --ignore-case` | Case-insensitive matching |
+| `--dry-run` | Preview changes without modifying the file |
+
+The replacement string supports **capture groups** using `$1`, `$2`, etc.
+
+**Examples**
+
+```sh
+# Simple text replacement across all cells
+nbedit replace analysis.ipynb all "foo" "bar"
+
+# Case-insensitive replacement
+nbedit replace analysis.ipynb all "todo" "DONE" -i
+
+# Rename a function using a capture group
+nbedit replace analysis.ipynb all "def (\w+)\(" "def new_$1("
+
+# Preview changes before writing
+nbedit replace analysis.ipynb all "old_api" "new_api" --dry-run
+
+# Only in code cells
+nbedit replace analysis.ipynb 1,3-5 "import numpy" "import numpy as np" --type code
 ```
 
 Exits with code `1` if no matches are found.

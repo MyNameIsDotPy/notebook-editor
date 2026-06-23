@@ -44,6 +44,10 @@ pub enum Command {
         /// Emit the full cell JSON instead of plain source
         #[arg(long)]
         json: bool,
+
+        /// Only print specific lines within each cell (same syntax as cell selection)
+        #[arg(long)]
+        lines: Option<String>,
     },
 
     /// Create a new cell
@@ -91,6 +95,10 @@ pub enum Command {
         /// Change the cell type
         #[arg(long, value_enum)]
         r#type: Option<CellTypeArg>,
+
+        /// Only replace specific lines within the cell (same syntax as cell selection)
+        #[arg(long)]
+        lines: Option<String>,
     },
 
     /// Remove one or more cells
@@ -144,6 +152,33 @@ pub enum Command {
         /// Case-insensitive matching
         #[arg(short = 'i', long)]
         ignore_case: bool,
+    },
+
+    /// Find and replace text (regex) within cell sources
+    Replace {
+        /// Path to the notebook file
+        notebook: String,
+
+        /// Cell selection: index, list (1,3,5), range (2-6), or keywords 'all'/'last'
+        selection: String,
+
+        /// Regex pattern to search for
+        pattern: String,
+
+        /// Replacement string (supports capture groups: $1, $2, …)
+        replacement: String,
+
+        /// Filter by cell type
+        #[arg(long, value_enum)]
+        r#type: Option<CellTypeFilter>,
+
+        /// Case-insensitive matching
+        #[arg(short = 'i', long)]
+        ignore_case: bool,
+
+        /// Show what would change without modifying the file
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 

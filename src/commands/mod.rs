@@ -3,6 +3,7 @@ pub mod delete;
 pub mod edit;
 pub mod info;
 pub mod read;
+pub mod replace;
 pub mod r#move;
 pub mod search;
 
@@ -17,12 +18,14 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             r#type,
             show_outputs,
             json,
+            lines,
         } => read::run(
             &notebook,
             &selection,
             r#type.as_ref().map(|t| t.as_str()),
             show_outputs,
             json,
+            lines.as_deref(),
         ),
 
         Command::Create {
@@ -48,6 +51,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             file,
             editor,
             r#type,
+            lines,
         } => edit::run(
             &notebook,
             index,
@@ -55,6 +59,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             file,
             editor,
             r#type.as_ref().map(|t| t.as_str()),
+            lines.as_deref(),
             cli.backup,
             cli.quiet,
         ),
@@ -72,6 +77,26 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         } => r#move::run(&notebook, &selection, &to, cli.backup, cli.quiet),
 
         Command::Info { notebook } => info::run(&notebook),
+
+        Command::Replace {
+            notebook,
+            selection,
+            pattern,
+            replacement,
+            r#type,
+            ignore_case,
+            dry_run,
+        } => replace::run(
+            &notebook,
+            &selection,
+            &pattern,
+            &replacement,
+            r#type.as_ref().map(|t| t.as_str()),
+            ignore_case,
+            dry_run,
+            cli.backup,
+            cli.quiet,
+        ),
 
         Command::Search {
             notebook,
