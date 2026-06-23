@@ -11,6 +11,9 @@ pub fn run(
     use_editor: bool,
     new_type: Option<&str>,
     lines_expr: Option<&str>,
+    insert_after: Option<usize>,
+    insert_before: Option<usize>,
+    delete_lines: Option<&str>,
     backup: bool,
     quiet: bool,
 ) -> Result<()> {
@@ -21,8 +24,88 @@ pub fn run(
     }
     let idx = index - 1;
 
-    if let Some(expr) = lines_expr {
-        // Line-level edit: replace only the specified lines
+    if let Some(expr) = delete_lines {
+        // ── Delete specific lines within the cell ──────────────────────────
+        let current = nb.cells[idx].source_str();
+        let all_lines: Vec<&str> = current.lines().collect();
+        if all_lines.is_empty() {
+            bail!("Cell {index} is empty, cannot delete lines");
+        }
+        let to_delete = selection::resolve(expr, all_lines.len())?;
+        let new_src: Vec<&str> = all_lines
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !to_delete.contains(i))
+            .map(|(_, l)| *l)
+            .collect();
+        let mut joined = new_src.join("\n");
+        if current.ends_with('\n') && !joined.is_empty() {
+            joined.push('\n');
+        }
+        nb.cells[idx].set_source(joined);
+
+        if !quiet {
+            eprintln!("Deleted {} line(s) from cell {index}", to_delete.len());
+        }
+
+    } else if let Some(after) = insert_after {
+        // ── Insert lines after a given line number ─────────────────────────
+        let new_content = resolve_source(source, file)?;
+        let current = nb.cells[idx].source_str();
+        let mut all_lines: Vec<String> = current.lines().map(|l| l.to_string()).collect();
+
+        if after == 0 || after > all_lines.len() {
+            bail!(
+                "--insert-after {after} is out of range (cell {index} has {} lines)",
+                all_lines.len()
+            );
+        }
+
+        let insert_lines: Vec<String> = new_content.lines().map(|l| l.to_string()).collect();
+        for (offset, line) in insert_lines.into_iter().enumerate() {
+            all_lines.insert(after + offset, line);
+        }
+
+        let mut new_src = all_lines.join("\n");
+        if current.ends_with('\n') {
+            new_src.push('\n');
+        }
+        nb.cells[idx].set_source(new_src);
+
+        if !quiet {
+            eprintln!("Inserted line(s) after line {after} in cell {index}");
+        }
+
+    } else if let Some(before) = insert_before {
+        // ── Insert lines before a given line number ────────────────────────
+        let new_content = resolve_source(source, file)?;
+        let current = nb.cells[idx].source_str();
+        let mut all_lines: Vec<String> = current.lines().map(|l| l.to_string()).collect();
+
+        if before == 0 || before > all_lines.len() {
+            bail!(
+                "--insert-before {before} is out of range (cell {index} has {} lines)",
+                all_lines.len()
+            );
+        }
+
+        let insert_lines: Vec<String> = new_content.lines().map(|l| l.to_string()).collect();
+        for (offset, line) in insert_lines.into_iter().enumerate() {
+            all_lines.insert(before - 1 + offset, line);
+        }
+
+        let mut new_src = all_lines.join("\n");
+        if current.ends_with('\n') {
+            new_src.push('\n');
+        }
+        nb.cells[idx].set_source(new_src);
+
+        if !quiet {
+            eprintln!("Inserted line(s) before line {before} in cell {index}");
+        }
+
+    } else if let Some(expr) = lines_expr {
+        // ── Replace specific lines ─────────────────────────────────────────
         let new_content = resolve_source(source, file)?;
         let current = nb.cells[idx].source_str();
         let mut all_lines: Vec<String> = current.lines().map(|l| l.to_string()).collect();
@@ -35,29 +118,27 @@ pub fn run(
         let replacement_lines: Vec<&str> = new_content.lines().collect();
 
         if line_indices.len() == 1 {
-            // Single line: replace with potentially multiple lines
             let pos = line_indices[0];
             all_lines.splice(pos..=pos, replacement_lines.iter().map(|s| s.to_string()));
         } else {
-            // Multi-line selection: replace each targeted line with the corresponding
-            // replacement line (cycling if fewer replacements than targets)
             for (i, &li) in line_indices.iter().enumerate() {
-                let replacement = replacement_lines
-                    .get(i)
-                    .copied()
-                    .unwrap_or("");
+                let replacement = replacement_lines.get(i).copied().unwrap_or("");
                 all_lines[li] = replacement.to_string();
             }
         }
 
-        // Re-join preserving trailing newline if original had one
         let mut new_src = all_lines.join("\n");
         if current.ends_with('\n') {
             new_src.push('\n');
         }
         nb.cells[idx].set_source(new_src);
+
+        if !quiet {
+            eprintln!("Cell {index} lines updated");
+        }
+
     } else {
-        // Full-cell edit
+        // ── Full-cell replace ──────────────────────────────────────────────
         let src: Option<String> = if use_editor {
             Some(open_in_editor(&nb.cells[idx].source_str())?)
         } else if source.is_some() || file.is_some() {
@@ -68,6 +149,10 @@ pub fn run(
 
         if let Some(s) = src {
             nb.cells[idx].set_source(s);
+        }
+
+        if !quiet {
+            eprintln!("Cell {index} updated");
         }
     }
 
@@ -84,11 +169,6 @@ pub fn run(
     }
 
     nb.save(notebook, backup)?;
-
-    if !quiet {
-        eprintln!("Cell {index} updated");
-    }
-
     Ok(())
 }
 
@@ -97,9 +177,7 @@ fn open_in_editor(current_source: &str) -> Result<String> {
 
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
 
-    let mut tmp = tempfile::Builder::new()
-        .suffix(".py")
-        .tempfile()?;
+    let mut tmp = tempfile::Builder::new().suffix(".py").tempfile()?;
     tmp.write_all(current_source.as_bytes())?;
     let path = tmp.path().to_owned();
     tmp.flush()?;

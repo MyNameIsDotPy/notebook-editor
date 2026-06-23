@@ -97,8 +97,20 @@ pub enum Command {
         r#type: Option<CellTypeArg>,
 
         /// Only replace specific lines within the cell (same syntax as cell selection)
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["insert_after", "insert_before", "delete_lines"])]
         lines: Option<String>,
+
+        /// Insert new content after this line number (1-based)
+        #[arg(long, conflicts_with_all = ["lines", "insert_before", "delete_lines", "editor"])]
+        insert_after: Option<usize>,
+
+        /// Insert new content before this line number (1-based)
+        #[arg(long, conflicts_with_all = ["lines", "insert_after", "delete_lines", "editor"])]
+        insert_before: Option<usize>,
+
+        /// Delete specific lines within the cell (same syntax as cell selection)
+        #[arg(long, conflicts_with_all = ["lines", "insert_after", "insert_before", "source", "file", "editor"])]
+        delete_lines: Option<String>,
     },
 
     /// Remove one or more cells

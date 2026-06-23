@@ -138,6 +138,9 @@ nbedit edit <NOTEBOOK> <INDEX> [OPTIONS]
 | `--editor`       | Open the cell in `$EDITOR` (default: vi) |
 | `--type`         | Change the cell type                     |
 | `--lines <EXPR>` | Replace only specific lines within the cell |
+| `--insert-after <N>` | Insert content after line N          |
+| `--insert-before <N>` | Insert content before line N        |
+| `--delete-lines <EXPR>` | Delete specific lines within the cell |
 
 ```sh
 nbedit edit analysis.ipynb 4 --source "x = 42"
@@ -150,6 +153,21 @@ nbedit edit analysis.ipynb 4 --lines 3 --source "x = 99"
 
 # Replace lines 2-4 of cell 1
 nbedit edit analysis.ipynb 1 --lines 2-4 --source "# rewritten"
+
+# Insert after line 2
+nbedit edit analysis.ipynb 4 --insert-after 2 --source "import json"
+
+# Insert before line 1 (prepend)
+nbedit edit analysis.ipynb 4 --insert-before 1 --source "# header"
+
+# Insert from file after line 5
+nbedit edit analysis.ipynb 4 --insert-after 5 --file snippet.py
+
+# Delete lines 3 and 5
+nbedit edit analysis.ipynb 4 --delete-lines 3,5
+
+# Delete a range of lines
+nbedit edit analysis.ipynb 4 --delete-lines 2-4
 ```
 
 ---

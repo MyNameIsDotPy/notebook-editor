@@ -129,6 +129,9 @@ The index must be a single cell (not a range).
 | `--editor` | Open the cell in `$EDITOR` (default: `vi`) |
 | `--type <TYPE>` | Change the cell type |
 | `--lines <EXPR>` | Replace only specific lines within the cell |
+| `--insert-after <N>` | Insert new content after line N |
+| `--insert-before <N>` | Insert new content before line N |
+| `--delete-lines <EXPR>` | Delete specific lines within the cell |
 
 **Examples**
 
@@ -140,8 +143,23 @@ nbedit edit analysis.ipynb 4 --editor
 # Replace line 3 of cell 4
 nbedit edit analysis.ipynb 4 --lines 3 --source "x = 99"
 
-# Replace lines 2 to 4 with new content
+# Replace lines 2 to 4
 nbedit edit analysis.ipynb 4 --lines 2-4 --source "# rewritten"
+
+# Insert a new line after line 2
+nbedit edit analysis.ipynb 4 --insert-after 2 --source "import json"
+
+# Insert multiple lines before line 1
+nbedit edit analysis.ipynb 4 --insert-before 1 --source "# header"
+
+# Insert from a file after line 5
+nbedit edit analysis.ipynb 4 --insert-after 5 --file snippet.py
+
+# Delete lines 3 and 5
+nbedit edit analysis.ipynb 4 --delete-lines 3,5
+
+# Delete a range of lines
+nbedit edit analysis.ipynb 4 --delete-lines 2-4
 ```
 
 ---
