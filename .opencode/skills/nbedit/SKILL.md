@@ -274,12 +274,19 @@ pip install nbclient nbformat
 
 | Option | Default | Description |
 |---|---|---|
-| `--timeout <N>` | `30` | Per-cell execution timeout in seconds |
+| `--timeout <N>` | `-1` | Per-cell execution timeout in seconds (-1 for no limit) |
 | `--kernel <NAME>` | from notebook | Override the kernel name |
+
+The kernel process runs with the notebook's directory as its working directory, so
+relative paths inside notebook code (e.g. `open("data.csv")`) resolve correctly.
+Output from the kernel streams to the terminal in real time.
 
 ```sh
 # Execute cell 3
 nbedit run analysis.ipynb 3
+
+# Execute all cells (no timeout by default)
+nbedit run analysis.ipynb all
 
 # Execute all cells with a 60-second timeout
 nbedit run analysis.ipynb all --timeout 60

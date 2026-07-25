@@ -216,9 +216,9 @@ pub enum Command {
         /// Cell selection: index, list (1,3,5), range (2-6), or keywords 'all'/'last'
         selection: String,
 
-        /// Per-cell execution timeout in seconds
-        #[arg(long, default_value = "30")]
-        timeout: u64,
+        /// Per-cell execution timeout in seconds (-1 for no limit)
+        #[arg(long, default_value = "-1")]
+        timeout: i64,
 
         /// Kernel name override (default: from notebook metadata)
         #[arg(long)]

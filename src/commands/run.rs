@@ -5,7 +5,7 @@ use crate::selection;
 pub fn run(
     notebook: &str,
     selection: &str,
-    timeout: u64,
+    timeout: i64,
     kernel: Option<&str>,
     backup: bool,
     quiet: bool,
@@ -80,6 +80,10 @@ pub fn run(
 
     let python = find_python()?;
 
+    let notebook_dir = std::path::Path::new(notebook)
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
+
     if !quiet {
         eprintln!("Executing {} code cell(s)...", code_indices.len());
     }
@@ -87,6 +91,8 @@ pub fn run(
     let status = std::process::Command::new(&python)
         .arg("-c")
         .arg(&script)
+        .current_dir(notebook_dir)
+        .env("PYTHONUNBUFFERED", "1")
         .status()
         .map_err(|e| anyhow::anyhow!("Failed to launch '{python}': {e}"))?;
 
