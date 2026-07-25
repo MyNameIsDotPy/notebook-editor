@@ -142,17 +142,42 @@ nbedit edit <NOTEBOOK> <INDEX> [OPTIONS]
 | `--insert-before <N>` | Insert content before line N        |
 | `--delete-lines <EXPR>` | Delete specific lines within the cell |
 
+**`--lines` is a block replace.** All lines from the first to the last selected index are
+removed and replaced with the full replacement content. The cell can grow or shrink.
+
+```
+--lines 3           removes line 3, inserts all replacement lines there
+--lines 2-4         removes lines 2, 3, 4, inserts all replacement lines at position 2
+--lines 1,5         removes lines 1 through 5 (the whole span), inserts replacement
+```
+
+**`--insert-before`/`--insert-after` bounds:** N must be 1..=cell_line_count.
+To append to the end of a cell use `--insert-after <last_line_number>`.
+
+**Multi-line `--source` in the shell:** use `$'line1\nline2'` (bash/zsh) or `--file`.
+A double-quoted `"line1\nline2"` passes a literal backslash-n, not a newline.
+
+**Safe workflow:**
+```sh
+# 1. See the cell with line numbers
+nbedit read nb.ipynb 4
+# 2. Apply change
+nbedit edit nb.ipynb 4 --lines 3 --source $'new line A\nnew line B'
+# 3. Verify
+nbedit read nb.ipynb 4
+```
+
 ```sh
 nbedit edit analysis.ipynb 4 --source "x = 42"
 nbedit edit analysis.ipynb 4 --file updated.py
 nbedit edit analysis.ipynb 4 --editor
 nbedit edit analysis.ipynb 4 --type markdown
 
-# Replace only line 3 of cell 4
-nbedit edit analysis.ipynb 4 --lines 3 --source "x = 99"
+# Replace line 3 of cell 4 with two lines (cell grows by 1)
+nbedit edit analysis.ipynb 4 --lines 3 --source $'x = 99\ny = 0'
 
-# Replace lines 2-4 of cell 1
-nbedit edit analysis.ipynb 1 --lines 2-4 --source "# rewritten"
+# Replace the block at lines 2-4 with two lines (cell shrinks by 1)
+nbedit edit analysis.ipynb 1 --lines 2-4 --source $'# rewritten\n# second line'
 
 # Insert after line 2
 nbedit edit analysis.ipynb 4 --insert-after 2 --source "import json"
@@ -169,6 +194,102 @@ nbedit edit analysis.ipynb 4 --delete-lines 3,5
 # Delete a range of lines
 nbedit edit analysis.ipynb 4 --delete-lines 2-4
 ```
+
+---
+
+### `clear` — clear outputs and reset execution counts
+
+```sh
+nbedit clear <NOTEBOOK> <SELECTION> [--dry-run]
+```
+
+Clears `outputs` and resets `execution_count` to `null` on all code cells in the
+selection. Markdown and raw cells are skipped. Use before committing notebooks to avoid
+storing large output blobs in version control.
+
+```sh
+# Clear all cells
+nbedit clear analysis.ipynb all
+
+# Clear a specific range
+nbedit clear analysis.ipynb 3-7
+
+# Preview what would be cleared
+nbedit clear analysis.ipynb all --dry-run
+```
+
+---
+
+### `copy` — copy cells between notebooks
+
+```sh
+nbedit copy <SRC> <SELECTION> <DST> [--at N]
+```
+
+Copies the selected cells from `SRC` into `DST`. `--at N` inserts before position N
+(1-based); omit to append.
+
+```sh
+# Append cells 2-4 from one notebook to another
+nbedit copy analysis.ipynb 2-4 report.ipynb
+
+# Insert cell 1 from src before cell 3 in dst
+nbedit copy helpers.ipynb 1 analysis.ipynb --at 3
+```
+
+---
+
+### `diff` — cell-level diff between two notebooks
+
+```sh
+nbedit diff <A> <B> [--detailed]
+```
+
+Compares two notebooks cell by cell, ignoring outputs and metadata. Shows added (`+`),
+removed (`-`), and changed (`~`) cells. `--detailed` also shows a line-level diff of
+the source within changed cells.
+
+Exits with code `1` if any differences are found, `0` if notebooks are identical.
+
+```sh
+nbedit diff original.ipynb modified.ipynb
+nbedit diff original.ipynb modified.ipynb --detailed
+```
+
+---
+
+### `run` — execute cells and capture outputs
+
+```sh
+nbedit run <NOTEBOOK> <SELECTION> [OPTIONS]
+```
+
+Executes selected code cells via a Jupyter kernel (using `nbclient`) and writes the
+outputs and execution counts back into the notebook. Markdown and raw cells in the
+selection are skipped. Requires Python 3 with `nbclient` and `nbformat` installed:
+
+```sh
+pip install nbclient nbformat
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `--timeout <N>` | `30` | Per-cell execution timeout in seconds |
+| `--kernel <NAME>` | from notebook | Override the kernel name |
+
+```sh
+# Execute cell 3
+nbedit run analysis.ipynb 3
+
+# Execute all cells with a 60-second timeout
+nbedit run analysis.ipynb all --timeout 60
+
+# Execute cells 1-5 using a specific kernel
+nbedit run analysis.ipynb 1-5 --kernel python3
+```
+
+Exits with code `1` if any cell raised an exception (outputs are still saved).
+Exits with code `2` if `nbclient`/`nbformat` are not installed.
 
 ---
 
@@ -289,13 +410,11 @@ nbedit delete report.ipynb last --backup
 
 ## Exit codes
 
-| Code | Meaning                    |
-|------|----------------------------|
-| 0    | Success                    |
-| 1    | Usage error                |
-| 2    | File not found             |
-| 3    | Invalid notebook format    |
-| 4    | Cell index out of range    |
+| Code | Meaning                                                                 |
+|------|-------------------------------------------------------------------------|
+| 0    | Success                                                                 |
+| 1    | Runtime error (file not found, bad format, out of range) — or no matches found by `search`/`replace` |
+| 2    | Bad CLI arguments (clap)                                                |
 
 ---
 

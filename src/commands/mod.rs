@@ -1,10 +1,14 @@
+pub mod clear;
+pub mod copy;
 pub mod create;
+pub mod diff;
 pub mod delete;
 pub mod edit;
 pub mod info;
 pub mod read;
 pub mod replace;
 pub mod r#move;
+pub mod run;
 pub mod search;
 
 use anyhow::Result;
@@ -82,7 +86,31 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             to,
         } => r#move::run(&notebook, &selection, &to, cli.backup, cli.quiet),
 
+        Command::Clear { notebook, selection, dry_run } => {
+            clear::run(&notebook, &selection, dry_run, cli.backup, cli.quiet)
+        }
+
+        Command::Diff { a, b, detailed } => diff::run(&a, &b, detailed),
+
+        Command::Copy { src, selection, dst, at } => {
+            copy::run(&src, &selection, &dst, at, cli.backup, cli.quiet)
+        }
+
         Command::Info { notebook } => info::run(&notebook),
+
+        Command::Run {
+            notebook,
+            selection,
+            timeout,
+            kernel,
+        } => run::run(
+            &notebook,
+            &selection,
+            timeout,
+            kernel.as_deref(),
+            cli.backup,
+            cli.quiet,
+        ),
 
         Command::Replace {
             notebook,

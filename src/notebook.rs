@@ -12,20 +12,34 @@ pub struct Notebook {
     pub cells: Vec<Cell>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Cell {
     pub cell_type: String,
     #[serde(default)]
     pub metadata: Value,
-    /// Source lines. The spec allows both `Vec<String>` and a plain `String`;
-    /// we normalise to `Vec<String>` on load and back on save.
     pub source: CellSource,
-    /// Present only on code cells
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub execution_count: Option<Value>,
-    /// Present only on code cells
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub outputs: Vec<Value>,
+}
+
+impl serde::Serialize for Cell {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let is_code = self.cell_type == "code";
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("cell_type", &self.cell_type)?;
+        if is_code {
+            map.serialize_entry("execution_count", &self.execution_count)?;
+        }
+        map.serialize_entry("metadata", &self.metadata)?;
+        if is_code {
+            map.serialize_entry("outputs", &self.outputs)?;
+        }
+        map.serialize_entry("source", &self.source)?;
+        map.end()
+    }
 }
 
 impl Cell {
@@ -37,9 +51,16 @@ impl Cell {
         }
     }
 
-    /// Replace the source, storing it as a single string.
+    /// Replace the source, normalising to the nbformat array-of-lines form.
     pub fn set_source(&mut self, src: String) {
-        self.source = CellSource::Single(src);
+        if src.is_empty() {
+            self.source = CellSource::Lines(Vec::new());
+            return;
+        }
+        // split_inclusive keeps the \n attached to each line, which matches the
+        // nbformat spec (every line except the last ends with \n).
+        let lines: Vec<String> = src.split_inclusive('\n').map(|l| l.to_string()).collect();
+        self.source = CellSource::Lines(lines);
     }
 
     /// Create a new blank cell of the given type.
@@ -47,7 +68,7 @@ impl Cell {
         Cell {
             cell_type: cell_type.to_string(),
             metadata: Value::Object(Default::default()),
-            source: CellSource::Single(String::new()),
+            source: CellSource::Lines(Vec::new()),
             execution_count: if cell_type == "code" {
                 Some(Value::Null)
             } else {
@@ -55,6 +76,70 @@ impl Cell {
             },
             outputs: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn code(src: &str) -> Cell {
+        let mut c = Cell::new("code");
+        c.set_source(src.to_string());
+        c
+    }
+
+    #[test]
+    fn set_source_empty_yields_empty_array() {
+        let mut c = code("");
+        c.set_source(String::new());
+        assert!(matches!(&c.source, CellSource::Lines(v) if v.is_empty()));
+    }
+
+    #[test]
+    fn set_source_single_line_no_trailing_newline() {
+        let c = code("x = 42");
+        assert!(matches!(&c.source, CellSource::Lines(v) if v == &["x = 42"]));
+    }
+
+    #[test]
+    fn set_source_multi_line_attaches_newlines() {
+        let c = code("a\nb\nc");
+        assert!(matches!(&c.source, CellSource::Lines(v) if v == &["a\n", "b\n", "c"]));
+    }
+
+    #[test]
+    fn set_source_trailing_newline() {
+        let c = code("a\nb\n");
+        assert!(matches!(&c.source, CellSource::Lines(v) if v == &["a\n", "b\n"]));
+    }
+
+    #[test]
+    fn source_str_roundtrip() {
+        let original = "import pandas\ndf = pd.read_csv('data.csv')";
+        assert_eq!(code(original).source_str(), original);
+    }
+
+    #[test]
+    fn code_cell_serializes_outputs_and_execution_count() {
+        let json = serde_json::to_value(Cell::new("code")).unwrap();
+        assert!(json.get("outputs").is_some(), "code cell must have outputs");
+        assert!(json.get("execution_count").is_some(), "code cell must have execution_count");
+    }
+
+    #[test]
+    fn markdown_cell_omits_outputs_and_execution_count() {
+        let json = serde_json::to_value(Cell::new("markdown")).unwrap();
+        assert!(json.get("outputs").is_none(), "markdown must not have outputs");
+        assert!(json.get("execution_count").is_none(), "markdown must not have execution_count");
+    }
+
+    #[test]
+    fn new_code_cell_source_serializes_as_empty_array() {
+        let json = serde_json::to_value(Cell::new("code")).unwrap();
+        let src = json.get("source").unwrap();
+        assert!(src.is_array());
+        assert_eq!(src.as_array().unwrap().len(), 0);
     }
 }
 

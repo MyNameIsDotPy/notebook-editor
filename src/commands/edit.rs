@@ -117,15 +117,9 @@ pub fn run(
         let line_indices = selection::resolve(expr, all_lines.len())?;
         let replacement_lines: Vec<&str> = new_content.lines().collect();
 
-        if line_indices.len() == 1 {
-            let pos = line_indices[0];
-            all_lines.splice(pos..=pos, replacement_lines.iter().map(|s| s.to_string()));
-        } else {
-            for (i, &li) in line_indices.iter().enumerate() {
-                let replacement = replacement_lines.get(i).copied().unwrap_or("");
-                all_lines[li] = replacement.to_string();
-            }
-        }
+        let first = line_indices[0];
+        let last = *line_indices.last().unwrap();
+        all_lines.splice(first..=last, replacement_lines.iter().map(|s| s.to_string()));
 
         let mut new_src = all_lines.join("\n");
         if current.ends_with('\n') {

@@ -166,6 +166,65 @@ pub enum Command {
         ignore_case: bool,
     },
 
+    /// Clear outputs and reset execution counts on selected cells
+    Clear {
+        /// Path to the notebook file
+        notebook: String,
+
+        /// Cell selection: index, list (1,3,5), range (2-6), or keywords 'all'/'last'
+        selection: String,
+
+        /// Print what would be cleared without modifying the file
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Show a cell-level diff between two notebooks (ignores outputs and metadata)
+    Diff {
+        /// First notebook file
+        a: String,
+
+        /// Second notebook file
+        b: String,
+
+        /// Also diff cell source line by line for changed cells
+        #[arg(long)]
+        detailed: bool,
+    },
+
+    /// Copy cells from one notebook into another
+    Copy {
+        /// Source notebook file
+        src: String,
+
+        /// Cell selection from the source notebook
+        selection: String,
+
+        /// Destination notebook file
+        dst: String,
+
+        /// Insert before this index in the destination (1-based); omit to append
+        #[arg(long)]
+        at: Option<usize>,
+    },
+
+    /// Execute cells via a Jupyter kernel and write outputs back to the notebook
+    Run {
+        /// Path to the notebook file
+        notebook: String,
+
+        /// Cell selection: index, list (1,3,5), range (2-6), or keywords 'all'/'last'
+        selection: String,
+
+        /// Per-cell execution timeout in seconds
+        #[arg(long, default_value = "30")]
+        timeout: u64,
+
+        /// Kernel name override (default: from notebook metadata)
+        #[arg(long)]
+        kernel: Option<String>,
+    },
+
     /// Find and replace text (regex) within cell sources
     Replace {
         /// Path to the notebook file

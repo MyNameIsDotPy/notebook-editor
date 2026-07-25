@@ -61,9 +61,9 @@ pub fn run(
     if dry_run {
         if total_replacements == 0 {
             eprintln!("No matches found for '{pattern}'");
-        } else {
-            eprintln!("{total_replacements} replacement(s) in {cells_changed} cell(s) (dry run — no changes written)");
+            std::process::exit(1);
         }
+        eprintln!("{total_replacements} replacement(s) in {cells_changed} cell(s) (dry run — no changes written)");
         return Ok(());
     }
 
