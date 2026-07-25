@@ -73,6 +73,12 @@ pub enum Command {
     },
 
     /// Replace the source of an existing cell
+    ///
+    /// Without line flags, replaces the entire cell source. Use --lines for a
+    /// block replace (removes the span, inserts replacement in its place),
+    /// --insert-after/--insert-before to add lines without removing any, or
+    /// --delete-lines to remove specific lines. --source and --file are mutually
+    /// exclusive; omit both with --editor to open the cell in $EDITOR.
     Edit {
         /// Path to the notebook file
         notebook: String,
@@ -146,6 +152,9 @@ pub enum Command {
     },
 
     /// Search for a pattern (regex) across cell sources
+    ///
+    /// Prints matching cells with the line number and content of each match,
+    /// prefixed with '>'. Exits with code 1 if no matches are found.
     Search {
         /// Path to the notebook file
         notebook: String,
@@ -167,6 +176,10 @@ pub enum Command {
     },
 
     /// Clear outputs and reset execution counts on selected cells
+    ///
+    /// Only code cells are affected; markdown and raw cells are skipped.
+    /// Useful before committing notebooks to avoid storing large output blobs
+    /// in version control.
     Clear {
         /// Path to the notebook file
         notebook: String,
@@ -180,6 +193,10 @@ pub enum Command {
     },
 
     /// Show a cell-level diff between two notebooks (ignores outputs and metadata)
+    ///
+    /// Prints added (+), removed (-), and changed (~) cells. --detailed also
+    /// shows a line-level diff of the source within changed cells. Exits with
+    /// code 1 if any differences are found.
     Diff {
         /// First notebook file
         a: String,
@@ -209,6 +226,15 @@ pub enum Command {
     },
 
     /// Execute cells via a Jupyter kernel and write outputs back to the notebook
+    ///
+    /// Runs the kernel from the notebook's directory so relative paths in cell
+    /// code (e.g. open("data.csv")) resolve correctly. Markdown and raw cells
+    /// are silently skipped. Kernel output streams to the terminal in real time.
+    ///
+    /// Requires Python with nbclient and nbformat: pip install nbclient nbformat
+    ///
+    /// Exits with code 1 if a cell raised an error (outputs still saved), or
+    /// code 2 if nbclient/nbformat are not installed.
     Run {
         /// Path to the notebook file
         notebook: String,
@@ -226,6 +252,10 @@ pub enum Command {
     },
 
     /// Find and replace text (regex) within cell sources
+    ///
+    /// Replacement supports capture groups ($1, $2, …). Use --dry-run to
+    /// preview changes before writing. Exits with code 1 if no matches are
+    /// found.
     Replace {
         /// Path to the notebook file
         notebook: String,
