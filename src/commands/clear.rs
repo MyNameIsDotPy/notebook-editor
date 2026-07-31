@@ -79,7 +79,10 @@ mod tests {
         run(&path, "1", false, false, true).unwrap();
         let nb = Notebook::from_file(&path).unwrap();
         assert!(nb.cells[0].outputs.is_empty());
-        assert_eq!(nb.cells[0].execution_count, Some(Value::Null));
+        // serde_json collapses an explicit JSON `null` into `None` on deserialize
+        // regardless of the Option's inner type, so `Some(Value::Null)` (what
+        // `run` writes) can never round-trip back from a saved file as-is.
+        assert_eq!(nb.cells[0].execution_count, None);
     }
 
     #[test]
