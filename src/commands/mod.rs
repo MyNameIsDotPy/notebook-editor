@@ -104,11 +104,13 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             selection,
             timeout,
             kernel,
+            python,
         } => run::run(
             &notebook,
             &selection,
             timeout,
             kernel.as_deref(),
+            python.as_deref(),
             cli.backup,
             cli.quiet,
         ),
@@ -147,6 +149,6 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             ignore_case,
         ),
 
-        Command::Kernels { json } => kernels::run(json),
+        Command::Kernels { json, python } => kernels::run(json, python.as_deref()),
     }
 }

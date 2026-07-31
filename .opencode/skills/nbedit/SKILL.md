@@ -275,7 +275,14 @@ pip install nbclient nbformat
 | Option | Default | Description |
 |---|---|---|
 | `--timeout <N>` | `-1` | Per-cell execution timeout in seconds (-1 for no limit) |
-| `--kernel <NAME>` | from notebook | Override the kernel name |
+| `--kernel <NAME>` | from notebook | Override the *execution* kernel (which language/env runs the cells — any registered kernelspec, e.g. an R kernel) |
+| `--python <PATH>` | PATH auto-detect | Override the *driver* interpreter (always Python — runs `nbclient`/`nbformat` to orchestrate execution) |
+
+`--kernel` and `--python` are independent: `--kernel` picks what executes the notebook's
+cells (any language), while `--python` picks what drives the orchestration (always Python,
+regardless of the cells' language). The driver defaults to `python3`, falling back to
+`python`, resolved via `PATH`; use `--python` when the interpreter you need isn't first on
+`PATH` and you can't reorder it (e.g. locked-down machines).
 
 The kernel process runs with the notebook's directory as its working directory, so
 relative paths inside notebook code (e.g. `open("data.csv")`) resolve correctly.
@@ -293,6 +300,9 @@ nbedit run analysis.ipynb all --timeout 60
 
 # Execute cells 1-5 using a specific kernel
 nbedit run analysis.ipynb 1-5 --kernel python3
+
+# Drive execution with a specific Python interpreter, not the one first on PATH
+nbedit run analysis.ipynb all --python "C:\Users\me\AppData\Local\Programs\Python\Python311\python.exe"
 ```
 
 Exits with code `1` if any cell raised an exception (outputs are still saved).
@@ -314,10 +324,12 @@ Requires Jupyter installed for that interpreter: `pip install jupyter`.
 | Option | Description |
 |---|---|
 | `--json` | Emit raw JSON from `jupyter kernelspec list --json` |
+| `--python <PATH>` | Override PATH-based `python3`/`python` auto-detection |
 
 ```sh
 nbedit kernels
 nbedit kernels --json
+nbedit kernels --python "C:\Users\me\AppData\Local\Programs\Python\Python311\python.exe"
 ```
 
 ---

@@ -7,6 +7,7 @@ pub fn run(
     selection: &str,
     timeout: i64,
     kernel: Option<&str>,
+    python: Option<&str>,
     backup: bool,
     quiet: bool,
 ) -> Result<()> {
@@ -50,7 +51,7 @@ pub fn run(
 
     let script = build_script(tmp_nb_str, timeout, kernel);
 
-    let python = find_python()?;
+    let python = find_python(python)?;
 
     let notebook_dir = std::path::Path::new(notebook)
         .parent()
@@ -107,7 +108,15 @@ pub fn run(
     Ok(())
 }
 
-pub(crate) fn find_python() -> Result<String> {
+/// Resolves the Python interpreter to drive execution with. `override_path`
+/// (the `--python` flag) takes precedence over PATH-based auto-detection —
+/// useful when the desired interpreter isn't first on PATH and the user
+/// can't or doesn't want to reorder it (e.g. locked-down machines).
+pub(crate) fn find_python(override_path: Option<&str>) -> Result<String> {
+    if let Some(path) = override_path {
+        return Ok(path.to_string());
+    }
+
     for candidate in ["python3", "python"] {
         if std::process::Command::new(candidate)
             .arg("--version")
@@ -118,7 +127,7 @@ pub(crate) fn find_python() -> Result<String> {
             return Ok(candidate.to_string());
         }
     }
-    bail!("Python not found — install Python 3 and ensure it is in your PATH")
+    bail!("Python not found — install Python 3 and ensure it is in your PATH, or pass --python <path>")
 }
 
 // Inline Python: execute the mini-notebook in place via nbclient.
@@ -205,7 +214,7 @@ mod tests {
     fn generated_script_is_syntactically_valid_python() {
         // Directly catches the class of bug this was written for: compile
         // (don't execute) the generated script with the system Python.
-        let Ok(python) = find_python() else {
+        let Ok(python) = find_python(None) else {
             eprintln!("skipping: no python interpreter found on PATH");
             return;
         };
@@ -221,5 +230,11 @@ mod tests {
             String::from_utf8_lossy(&output.stderr),
             script
         );
+    }
+
+    #[test]
+    fn find_python_prefers_override_path() {
+        let resolved = find_python(Some(r"C:\custom\python.exe")).unwrap();
+        assert_eq!(resolved, r"C:\custom\python.exe");
     }
 }

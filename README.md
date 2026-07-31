@@ -332,8 +332,11 @@ nbedit kernels
 | Option | Description |
 |---|---|
 | `--json` | Emit raw JSON from `jupyter kernelspec list --json` |
+| `--python <PATH>` | Path to the Python interpreter to use, overriding PATH-based `python3`/`python` auto-detection |
 
 Delegates to `jupyter kernelspec list`, run under whichever Python `nbedit` resolves (`python3`, falling back to `python`) — the same interpreter used by `run`. Requires Jupyter to be installed there: `pip install jupyter`.
+
+Use `--python` when the interpreter you need isn't first on `PATH` and you can't (or don't want to) reorder it — e.g. `nbedit kernels --python "C:\Users\me\AppData\Local\Programs\Python\Python311\python.exe"`.
 
 ---
 

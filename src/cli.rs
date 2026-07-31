@@ -249,6 +249,11 @@ pub enum Command {
         /// Kernel name override (default: from notebook metadata)
         #[arg(long)]
         kernel: Option<String>,
+
+        /// Path to the Python interpreter to drive execution with
+        /// (overrides PATH-based python3/python auto-detection)
+        #[arg(long)]
+        python: Option<String>,
     },
 
     /// Find and replace text (regex) within cell sources
@@ -291,6 +296,11 @@ pub enum Command {
         /// Emit raw JSON from `jupyter kernelspec list --json`
         #[arg(long)]
         json: bool,
+
+        /// Path to the Python interpreter to use
+        /// (overrides PATH-based python3/python auto-detection)
+        #[arg(long)]
+        python: Option<String>,
     },
 }
 
