@@ -319,6 +319,24 @@ Exits with code `1` if no matches are found.
 
 ---
 
+### Kernels
+
+List Jupyter kernels installed on this machine. The kernel name printed here is what you pass to `run --kernel`.
+
+```
+nbedit kernels
+```
+
+**Options**
+
+| Option | Description |
+|---|---|
+| `--json` | Emit raw JSON from `jupyter kernelspec list --json` |
+
+Delegates to `jupyter kernelspec list`, run under whichever Python `nbedit` resolves (`python3`, falling back to `python`) — the same interpreter used by `run`. Requires Jupyter to be installed there: `pip install jupyter`.
+
+---
+
 ## Global Flags
 
 | Flag | Description |

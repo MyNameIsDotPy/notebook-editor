@@ -107,7 +107,7 @@ pub fn run(
     Ok(())
 }
 
-fn find_python() -> Result<String> {
+pub(crate) fn find_python() -> Result<String> {
     for candidate in ["python3", "python"] {
         if std::process::Command::new(candidate)
             .arg("--version")

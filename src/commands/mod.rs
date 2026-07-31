@@ -5,6 +5,7 @@ pub mod diff;
 pub mod delete;
 pub mod edit;
 pub mod info;
+pub mod kernels;
 pub mod read;
 pub mod replace;
 pub mod r#move;
@@ -145,5 +146,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             show_source,
             ignore_case,
         ),
+
+        Command::Kernels { json } => kernels::run(json),
     }
 }

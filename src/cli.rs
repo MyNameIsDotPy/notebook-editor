@@ -281,6 +281,17 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// List Jupyter kernels installed on this machine
+    ///
+    /// Delegates to `jupyter kernelspec list`. The kernel names printed here
+    /// are what you pass to `run --kernel`. Requires Jupyter to be installed
+    /// for whichever Python nbedit resolves (python3, falling back to python).
+    Kernels {
+        /// Emit raw JSON from `jupyter kernelspec list --json`
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Clone, ValueEnum)]

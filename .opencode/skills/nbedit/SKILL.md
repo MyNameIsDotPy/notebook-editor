@@ -1,6 +1,6 @@
 ---
 name: nbedit
-description: Use when the user asks about nbedit, how to read/edit/create/delete/move/search/replace cells or lines in a Jupyter notebook from the CLI, or how to use notebook-editor. Covers all nbedit subcommands (read, create, edit, delete, move, info, search, replace), line-level operations (--lines, --insert-after, --insert-before, --delete-lines), regex search and replace with capture groups, cell selection syntax, global flags, and build/install instructions.
+description: Use when the user asks about nbedit, how to read/edit/create/delete/move/search/replace/run cells or lines in a Jupyter notebook from the CLI, how to list installed Jupyter kernels, or how to use notebook-editor. Covers all nbedit subcommands (read, create, edit, delete, move, info, search, replace, clear, copy, diff, run, kernels), line-level operations (--lines, --insert-after, --insert-before, --delete-lines), regex search and replace with capture groups, cell selection syntax, global flags, and build/install instructions.
 ---
 
 # nbedit — notebook-editor skill
@@ -297,6 +297,28 @@ nbedit run analysis.ipynb 1-5 --kernel python3
 
 Exits with code `1` if any cell raised an exception (outputs are still saved).
 Exits with code `2` if `nbclient`/`nbformat` are not installed.
+
+---
+
+### `kernels` — list installed Jupyter kernels
+
+```sh
+nbedit kernels [OPTIONS]
+```
+
+Delegates to `jupyter kernelspec list`, run under whichever Python `nbedit` resolves
+(`python3`, falling back to `python`) — the same interpreter `run` uses to drive
+execution. The kernel names printed here are what you pass to `run --kernel`.
+Requires Jupyter installed for that interpreter: `pip install jupyter`.
+
+| Option | Description |
+|---|---|
+| `--json` | Emit raw JSON from `jupyter kernelspec list --json` |
+
+```sh
+nbedit kernels
+nbedit kernels --json
+```
 
 ---
 
