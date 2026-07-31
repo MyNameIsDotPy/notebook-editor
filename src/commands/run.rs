@@ -48,35 +48,7 @@ pub fn run(
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("temp path contains non-UTF-8 characters"))?;
 
-    let kernel_arg = kernel
-        .map(|k| format!(", kernel_name={k:?}"))
-        .unwrap_or_default();
-
-    // Inline Python: execute the mini-notebook in place via nbclient.
-    // CellExecutionError is caught so outputs (including tracebacks) are always
-    // written back; we still exit 1 so the caller knows a cell failed.
-    let script = format!(
-        "import sys\n\
-         try:\n\
-             import nbformat, nbclient\n\
-         except ImportError as e:\n\
-             print(f'Missing dependency: {{e}}', file=sys.stderr)\n\
-             print('Install with: pip install nbclient nbformat', file=sys.stderr)\n\
-             sys.exit(2)\n\
-         nb = nbformat.read(open({path:?}), as_version=4)\n\
-         client = nbclient.NotebookClient(nb, timeout={timeout}{kernel_arg})\n\
-         cell_error = False\n\
-         try:\n\
-             client.execute()\n\
-         except nbclient.exceptions.CellExecutionError as e:\n\
-             print(f'Cell raised an error: {{e.ename}}: {{e.evalue}}', file=sys.stderr)\n\
-             cell_error = True\n\
-         nbformat.write(nb, open({path:?}, 'w'))\n\
-         sys.exit(1 if cell_error else 0)\n",
-        path = tmp_nb_str,
-        timeout = timeout,
-        kernel_arg = kernel_arg,
-    );
+    let script = build_script(tmp_nb_str, timeout, kernel);
 
     let python = find_python()?;
 
@@ -147,4 +119,107 @@ fn find_python() -> Result<String> {
         }
     }
     bail!("Python not found — install Python 3 and ensure it is in your PATH")
+}
+
+// Inline Python: execute the mini-notebook in place via nbclient.
+// CellExecutionError is caught so outputs (including tracebacks) are always
+// written back; we still exit 1 so the caller knows a cell failed.
+//
+// Built as a joined Vec of lines rather than a `\`-continued string literal:
+// Rust strips ALL leading whitespace from a source line following a `\`
+// continuation, which silently discards Python indentation and produces
+// invalid syntax (`try:` with no indented body).
+fn build_script(path: &str, timeout: i64, kernel: Option<&str>) -> String {
+    let kernel_arg = kernel
+        .map(|k| format!(", kernel_name={k:?}"))
+        .unwrap_or_default();
+    let path_repr = format!("{path:?}");
+
+    let lines: Vec<String> = vec![
+        "import sys".to_string(),
+        "try:".to_string(),
+        "    import nbformat, nbclient".to_string(),
+        "except ImportError as e:".to_string(),
+        "    print(f'Missing dependency: {e}', file=sys.stderr)".to_string(),
+        "    print('Install with: pip install nbclient nbformat', file=sys.stderr)".to_string(),
+        "    sys.exit(2)".to_string(),
+        format!("nb = nbformat.read(open({path_repr}), as_version=4)"),
+        format!("client = nbclient.NotebookClient(nb, timeout={timeout}{kernel_arg})"),
+        "cell_error = False".to_string(),
+        "try:".to_string(),
+        "    client.execute()".to_string(),
+        "except nbclient.exceptions.CellExecutionError as e:".to_string(),
+        "    print(f'Cell raised an error: {e.ename}: {e.evalue}', file=sys.stderr)".to_string(),
+        "    cell_error = True".to_string(),
+        format!("nbformat.write(nb, open({path_repr}, 'w'))"),
+        "sys.exit(1 if cell_error else 0)".to_string(),
+    ];
+
+    lines.join("\n") + "\n"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_block_header_is_followed_by_an_indented_line() {
+        // Regression test for the original bug: a `\`-continued Rust string
+        // literal silently stripped Python indentation, turning `try:` into
+        // a statement with no body (IndentationError at runtime).
+        let script = build_script("nb.ipynb", 60, Some("python3"));
+        let lines: Vec<&str> = script.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            if line.trim_end().ends_with(':') {
+                let next = lines
+                    .get(i + 1)
+                    .unwrap_or_else(|| panic!("line {i} ({line:?}) opens a block but has no following line"));
+                assert!(
+                    next.starts_with("    "),
+                    "line {i} ({line:?}) opens a block but next line {next:?} is not indented"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn omits_kernel_arg_when_not_specified() {
+        let script = build_script("nb.ipynb", 60, None);
+        assert!(script.contains("NotebookClient(nb, timeout=60)"));
+        assert!(!script.contains("kernel_name"));
+    }
+
+    #[test]
+    fn includes_kernel_arg_when_specified() {
+        let script = build_script("nb.ipynb", 60, Some("python3119"));
+        assert!(script.contains(r#"kernel_name="python3119""#));
+    }
+
+    #[test]
+    fn embeds_windows_path_as_escaped_python_string_literal() {
+        let script = build_script(r"C:\tmp\exec.ipynb", 60, None);
+        assert!(script.contains(r#"open("C:\\tmp\\exec.ipynb")"#));
+    }
+
+    #[test]
+    fn generated_script_is_syntactically_valid_python() {
+        // Directly catches the class of bug this was written for: compile
+        // (don't execute) the generated script with the system Python.
+        let Ok(python) = find_python() else {
+            eprintln!("skipping: no python interpreter found on PATH");
+            return;
+        };
+        let script = build_script("nb.ipynb", 60, Some("python3"));
+        let output = std::process::Command::new(&python)
+            .arg("-c")
+            .arg(format!("compile({script:?}, '<test>', 'exec')"))
+            .output()
+            .expect("failed to invoke python");
+        assert!(
+            output.status.success(),
+            "generated script failed to compile:\n{}\n---\n{}",
+            String::from_utf8_lossy(&output.stderr),
+            script
+        );
+    }
 }
