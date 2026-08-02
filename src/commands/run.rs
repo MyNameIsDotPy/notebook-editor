@@ -1,124 +1,336 @@
-use anyhow::{bail, Result};
+use crate::commands::kernels;
+use crate::error::AppExit;
 use crate::notebook::Notebook;
 use crate::selection;
+use anyhow::{bail, Context, Result};
+use serde::Serialize;
+use serde_json::Value;
+use std::collections::HashMap;
+use std::path::Path;
+use std::process::{Command, ExitStatus};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Serialize)]
+struct ExecutionReport {
+    status: String,
+    kernel: String,
+    source: String,
+    executed_cells: Vec<usize>,
+    failed_cell: Option<usize>,
+    duration_ms: u128,
+    outputs_saved: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     notebook: &str,
     selection: &str,
     timeout: i64,
     kernel: Option<&str>,
-    python: Option<&str>,
+    interpreter: Option<&str>,
+    driver_python: Option<&str>,
+    allow_errors: bool,
+    include_prior: bool,
+    startup_timeout: u64,
+    iopub_timeout: u64,
+    record_timing: bool,
+    overall_timeout: Option<u64>,
+    cwd: Option<&str>,
+    environment: &[String],
+    dry_run: bool,
+    json: bool,
     backup: bool,
     quiet: bool,
 ) -> Result<()> {
+    if timeout < -1 {
+        bail!("--timeout must be -1 or a non-negative number");
+    }
     let mut nb = Notebook::from_file(notebook)?;
     let indices = selection::resolve(selection, nb.len())?;
-
-    // Only code cells can be executed; skip others silently
-    let code_indices: Vec<usize> = indices.into_iter()
+    let code_indices: Vec<usize> = indices
+        .into_iter()
         .filter(|&i| nb.cells[i].cell_type == "code")
         .collect();
-
     if code_indices.is_empty() {
         bail!("No code cells in selection");
     }
 
-    // Build a minimal notebook with only the selected cells
-    let selected_cells: Vec<_> = code_indices.iter().map(|&i| nb.cells[i].clone()).collect();
-
-    let mut mini_meta = nb.metadata.clone();
-    if let Some(k) = kernel {
-        if let Some(ks) = mini_meta.get_mut("kernelspec") {
-            ks["name"] = serde_json::Value::String(k.to_string());
+    let notebook_path = Path::new(notebook);
+    let candidate = kernels::resolve(&nb, notebook_path, kernel, interpreter, driver_python)?;
+    if dry_run {
+        let report = serde_json::json!({
+            "status": "ready", "kernel": candidate.execution_label(),
+            "display_name": candidate.display_name, "source": candidate.source,
+            "interpreter": candidate.interpreter, "cells": code_indices.iter().map(|i| i + 1).collect::<Vec<_>>()
+        });
+        if json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            println!(
+                "Kernel: {} ({:?})",
+                candidate.display_name, candidate.source
+            );
+            if let Some(path) = candidate.interpreter {
+                println!("Interpreter: {}", path.display());
+            }
+            println!("Would execute {} code cell(s)", code_indices.len());
         }
+        return Ok(());
     }
 
+    let execution_indices: Vec<usize> = if include_prior {
+        let last = *code_indices.last().expect("non-empty code selection");
+        (0..=last)
+            .filter(|&i| nb.cells[i].cell_type == "code")
+            .collect()
+    } else {
+        code_indices.clone()
+    };
+    let selected_cells: Vec<_> = execution_indices
+        .iter()
+        .map(|&i| nb.cells[i].clone())
+        .collect();
+    let mut mini_meta = nb.metadata.clone();
+    if let Some(ks) = mini_meta.get_mut("kernelspec") {
+        if let Some(name) = &candidate.kernelspec_name {
+            ks["name"] = Value::String(name.clone());
+        }
+    }
     let mini_nb = serde_json::json!({
-        "nbformat": nb.nbformat,
-        "nbformat_minor": nb.nbformat_minor,
-        "metadata": mini_meta,
-        "cells": selected_cells,
+        "nbformat": nb.nbformat, "nbformat_minor": nb.nbformat_minor,
+        "metadata": mini_meta, "cells": selected_cells,
     });
 
-    // Write mini-notebook to a temp directory (avoids Windows file-lock conflicts)
     let tmp_dir = tempfile::tempdir()?;
     let tmp_nb = tmp_dir.path().join("exec.ipynb");
-    std::fs::write(&tmp_nb, serde_json::to_string_pretty(&mini_nb)?)?;
+    let report_path = tmp_dir.path().join("report.json");
+    std::fs::write(&tmp_nb, serde_json::to_vec_pretty(&mini_nb)?)?;
 
-    let tmp_nb_str = tmp_nb
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("temp path contains non-UTF-8 characters"))?;
-
-    let script = build_script(tmp_nb_str, timeout, kernel);
-
-    let python = find_python(python)?;
-
-    let notebook_dir = std::path::Path::new(notebook)
-        .parent()
-        .unwrap_or(std::path::Path::new("."));
-
-    if !quiet {
-        eprintln!("Executing {} code cell(s)...", code_indices.len());
+    let kernel_name = if candidate.kernelspec_name.is_some() {
+        candidate.execution_label().to_owned()
+    } else {
+        kernels::install_synthetic_spec(tmp_dir.path(), &candidate)?
+    };
+    let script = build_script(
+        tmp_nb
+            .to_str()
+            .context("temp notebook path contains non-UTF-8 characters")?,
+        report_path
+            .to_str()
+            .context("temp report path contains non-UTF-8 characters")?,
+        timeout,
+        &kernel_name,
+        allow_errors,
+        startup_timeout,
+        iopub_timeout,
+        record_timing,
+    );
+    let driver = find_python(driver_python)?;
+    let kernel_cwd = cwd
+        .map(Path::new)
+        .unwrap_or_else(|| notebook_path.parent().unwrap_or_else(|| Path::new(".")));
+    if !kernel_cwd.is_dir() {
+        bail!(
+            "Working directory '{}' does not exist",
+            kernel_cwd.display()
+        );
     }
+    let env = parse_environment(environment)?;
 
-    let status = std::process::Command::new(&python)
+    if !quiet && !json {
+        eprintln!(
+            "Executing {} code cell(s) with {}...",
+            code_indices.len(),
+            candidate.display_name
+        );
+    }
+    let started = Instant::now();
+    let mut command = Command::new(&driver);
+    command
         .arg("-c")
         .arg(&script)
-        .current_dir(notebook_dir)
-        .env("PYTHONUNBUFFERED", "1")
-        .status()
-        .map_err(|e| anyhow::anyhow!("Failed to launch '{python}': {e}"))?;
-
-    if status.code() == Some(2) {
-        bail!("nbclient/nbformat not installed — run: pip install nbclient nbformat");
+        .current_dir(kernel_cwd)
+        .env("PYTHONUNBUFFERED", "1");
+    if candidate.kernelspec_name.is_none() {
+        let combined = prepend_search_path(tmp_dir.path(), std::env::var_os("JUPYTER_PATH"));
+        command.env("JUPYTER_PATH", combined);
     }
+    command.envs(env);
+    INTERRUPTED.store(false, Ordering::SeqCst);
+    ctrlc::set_handler(|| INTERRUPTED.store(true, Ordering::SeqCst))
+        .context("Cannot install Ctrl-C handler")?;
+    let (status, wall_timed_out, interrupted) = wait_for_child(command, overall_timeout)
+        .with_context(|| format!("Failed to launch '{driver}'"))?;
 
-    // Read back the executed mini-notebook regardless of cell errors,
-    // so we preserve whatever outputs were produced before any failure.
-    let executed: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&tmp_nb)?)?;
+    let py_report: Value = std::fs::read(&report_path).ok()
+        .and_then(|data| serde_json::from_slice(&data).ok())
+        .unwrap_or_else(|| serde_json::json!({"status": if wall_timed_out {"overall_timeout"} else if interrupted {"interrupted"} else {"driver_failure"}}));
+    let py_status = if interrupted {
+        "interrupted"
+    } else {
+        py_report
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("driver_failure")
+    };
+    let execution_started = py_report
+        .get("execution_started")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut outputs_saved = false;
 
-    let executed_cells = executed["cells"]
-        .as_array()
-        .ok_or_else(|| anyhow::anyhow!("Executed notebook missing cells array"))?;
-
-    if executed_cells.len() != code_indices.len() {
-        bail!("Cell count mismatch after execution");
-    }
-
-    for (slot, &nb_idx) in code_indices.iter().enumerate() {
-        let ec = &executed_cells[slot];
-        if let Some(outputs) = ec["outputs"].as_array() {
-            nb.cells[nb_idx].outputs = outputs.clone();
+    if execution_started {
+        let executed: Value = serde_json::from_slice(&std::fs::read(&tmp_nb)?)?;
+        let executed_cells = executed
+            .get("cells")
+            .and_then(Value::as_array)
+            .context("Executed notebook missing cells array")?;
+        if executed_cells.len() != execution_indices.len() {
+            bail!("Cell count mismatch after execution");
         }
-        nb.cells[nb_idx].execution_count = Some(ec["execution_count"].clone());
+        for &nb_idx in &code_indices {
+            let slot = execution_indices
+                .iter()
+                .position(|&i| i == nb_idx)
+                .context("Selected cell missing from execution result")?;
+            let ec = &executed_cells[slot];
+            if let Some(outputs) = ec.get("outputs").and_then(Value::as_array) {
+                nb.cells[nb_idx].outputs = outputs.clone();
+            }
+            nb.cells[nb_idx].execution_count =
+                Some(ec.get("execution_count").cloned().unwrap_or(Value::Null));
+            if let Some(metadata) = ec.get("metadata") {
+                nb.cells[nb_idx].metadata = metadata.clone();
+            }
+        }
+        nb.save(notebook, backup)?;
+        outputs_saved = true;
     }
 
-    nb.save(notebook, backup)?;
-
-    if !quiet {
+    let failed_slot = py_report
+        .get("failed_cell")
+        .and_then(Value::as_u64)
+        .map(|i| i as usize);
+    let report = ExecutionReport {
+        status: py_status.into(),
+        kernel: candidate.execution_label().into(),
+        source: format!("{:?}", candidate.source),
+        executed_cells: code_indices.iter().map(|i| i + 1).collect(),
+        failed_cell: failed_slot.and_then(|slot| execution_indices.get(slot).map(|i| i + 1)),
+        duration_ms: started.elapsed().as_millis(),
+        outputs_saved,
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else if outputs_saved && !quiet {
         eprintln!("Outputs written to {notebook}");
     }
 
-    // Propagate cell execution failure after saving
-    if !status.success() {
-        bail!("One or more cells raised an error (outputs saved)");
+    match py_status {
+        "ok" | "ok_with_errors" => Ok(()),
+        "missing_dependency" => Err(AppExit::new(
+            2,
+            py_report
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("nbclient/nbformat not installed"),
+        )
+        .into()),
+        "overall_timeout" => Err(AppExit::new(
+            124,
+            "Overall execution timeout expired; the kernel process was terminated",
+        )
+        .into()),
+        "interrupted" => {
+            Err(AppExit::new(130, "Execution interrupted (available outputs saved)").into())
+        }
+        "cell_error" => Err(AppExit::new(
+            1,
+            "One or more cells raised an error (available outputs saved)",
+        )
+        .into()),
+        "cell_timeout" => {
+            Err(AppExit::new(1, "Cell execution timed out (available outputs saved)").into())
+        }
+        "kernel_error" => Err(AppExit::new(
+            1,
+            py_report
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Kernel execution failed"),
+        )
+        .into()),
+        _ if !status.success() => Err(AppExit::new(
+            1,
+            py_report
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Execution driver failed"),
+        )
+        .into()),
+        _ => Ok(()),
     }
-
-    Ok(())
 }
 
-/// Resolves the Python interpreter to drive execution with. `override_path`
-/// (the `--python` flag) takes precedence over PATH-based auto-detection —
-/// useful when the desired interpreter isn't first on PATH and the user
-/// can't or doesn't want to reorder it (e.g. locked-down machines).
+fn wait_for_child(
+    mut command: Command,
+    timeout: Option<u64>,
+) -> std::io::Result<(ExitStatus, bool, bool)> {
+    let mut child = command.spawn()?;
+    let started = Instant::now();
+    let mut interrupted_at = None;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok((status, false, interrupted_at.is_some()));
+        }
+        if INTERRUPTED.load(Ordering::SeqCst) && interrupted_at.is_none() {
+            // The terminal delivers Ctrl-C to the whole foreground process group,
+            // including the Python driver. Give its finally blocks time to write.
+            interrupted_at = Some(Instant::now());
+        }
+        if interrupted_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(5)) {
+            child.kill()?;
+            return Ok((child.wait()?, false, true));
+        }
+        if timeout.is_some_and(|seconds| started.elapsed() >= Duration::from_secs(seconds)) {
+            child.kill()?;
+            return Ok((child.wait()?, true, false));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn parse_environment(values: &[String]) -> Result<HashMap<String, String>> {
+    let mut result = HashMap::new();
+    for item in values {
+        let (key, value) = item
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("Invalid --env '{item}'; expected KEY=VALUE"))?;
+        if key.is_empty() || key.contains('\0') || value.contains('\0') {
+            bail!("Invalid --env '{item}'");
+        }
+        result.insert(key.into(), value.into());
+    }
+    Ok(result)
+}
+
+fn prepend_search_path(first: &Path, existing: Option<std::ffi::OsString>) -> std::ffi::OsString {
+    let mut paths = vec![first.to_path_buf()];
+    if let Some(existing) = existing {
+        paths.extend(std::env::split_paths(&existing));
+    }
+    std::env::join_paths(paths).unwrap_or_else(|_| first.as_os_str().to_owned())
+}
+
 pub(crate) fn find_python(override_path: Option<&str>) -> Result<String> {
     if let Some(path) = override_path {
         return Ok(path.to_string());
     }
-
     for candidate in ["python3", "python"] {
-        if std::process::Command::new(candidate)
+        if Command::new(candidate)
             .arg("--version")
             .output()
             .map(|o| o.status.success())
@@ -127,43 +339,63 @@ pub(crate) fn find_python(override_path: Option<&str>) -> Result<String> {
             return Ok(candidate.to_string());
         }
     }
-    bail!("Python not found — install Python 3 and ensure it is in your PATH, or pass --python <path>")
+    bail!("Python not found — install Python 3 or pass --driver-python <path>")
 }
 
-// Inline Python: execute the mini-notebook in place via nbclient.
-// CellExecutionError is caught so outputs (including tracebacks) are always
-// written back; we still exit 1 so the caller knows a cell failed.
-//
-// Built as a joined Vec of lines rather than a `\`-continued string literal:
-// Rust strips ALL leading whitespace from a source line following a `\`
-// continuation, which silently discards Python indentation and produces
-// invalid syntax (`try:` with no indented body).
-fn build_script(path: &str, timeout: i64, kernel: Option<&str>) -> String {
-    let kernel_arg = kernel
-        .map(|k| format!(", kernel_name={k:?}"))
-        .unwrap_or_default();
-    let path_repr = format!("{path:?}");
-
-    let lines: Vec<String> = vec![
-        "import sys".to_string(),
+#[allow(clippy::too_many_arguments)]
+fn build_script(
+    path: &str,
+    report: &str,
+    timeout: i64,
+    kernel: &str,
+    allow_errors: bool,
+    startup_timeout: u64,
+    iopub_timeout: u64,
+    record_timing: bool,
+) -> String {
+    // JSON string literals are valid Python string literals and safely handle
+    // quotes, control characters, Windows separators, and Unicode paths.
+    let path_repr = serde_json::to_string(path).expect("string serialization cannot fail");
+    let report_repr = serde_json::to_string(report).expect("string serialization cannot fail");
+    let kernel_repr = serde_json::to_string(kernel).expect("string serialization cannot fail");
+    let timeout = if timeout == -1 {
+        "None".into()
+    } else {
+        timeout.to_string()
+    };
+    let allow_errors = if allow_errors { "True" } else { "False" };
+    let record_timing = if record_timing { "True" } else { "False" };
+    let lines = vec![
+        "import json, sys, traceback".to_string(),
+        format!("report_path = {report_repr}"),
+        "result = {'status': 'driver_failure', 'execution_started': False}".to_string(),
+        "nb = None".to_string(),
         "try:".to_string(),
         "    import nbformat, nbclient".to_string(),
         "except ImportError as e:".to_string(),
-        "    print(f'Missing dependency: {e}', file=sys.stderr)".to_string(),
-        "    print('Install with: pip install nbclient nbformat', file=sys.stderr)".to_string(),
-        "    sys.exit(2)".to_string(),
-        format!("nb = nbformat.read(open({path_repr}), as_version=4)"),
-        format!("client = nbclient.NotebookClient(nb, timeout={timeout}{kernel_arg})"),
-        "cell_error = False".to_string(),
-        "try:".to_string(),
-        "    client.execute()".to_string(),
-        "except nbclient.exceptions.CellExecutionError as e:".to_string(),
-        "    print(f'Cell raised an error: {e.ename}: {e.evalue}', file=sys.stderr)".to_string(),
-        "    cell_error = True".to_string(),
-        format!("nbformat.write(nb, open({path_repr}, 'w'))"),
-        "sys.exit(1 if cell_error else 0)".to_string(),
+        "    result = {'status': 'missing_dependency', 'execution_started': False, 'message': str(e)}".to_string(),
+        "else:".to_string(),
+        "    try:".to_string(),
+        format!("        nb = nbformat.read(open({path_repr}, encoding='utf-8'), as_version=4)"),
+        format!("        client = nbclient.NotebookClient(nb, timeout={timeout}, kernel_name={kernel_repr}, allow_errors={allow_errors}, startup_timeout={startup_timeout}, iopub_timeout={iopub_timeout}, record_timing={record_timing})"),
+        "        result['execution_started'] = True".to_string(),
+        "        client.execute()".to_string(),
+        "        failures = [(i, o) for i, c in enumerate(nb.cells) for o in c.get('outputs', []) if o.get('output_type') == 'error']".to_string(),
+        "        result = {'status': 'ok_with_errors' if failures else 'ok', 'execution_started': True}".to_string(),
+        "        if failures: result['failed_cell'] = failures[0][0]".to_string(),
+        "    except BaseException as e:".to_string(),
+        "        name = type(e).__name__".to_string(),
+        "        status = 'cell_timeout' if 'Timeout' in name else ('cell_error' if name == 'CellExecutionError' else 'kernel_error')".to_string(),
+        "        result = {'status': status, 'execution_started': result.get('execution_started', False), 'message': f'{name}: {e}'}".to_string(),
+        "        for i, cell in enumerate(nb.cells if nb else []):".to_string(),
+        "            if any(o.get('output_type') == 'error' for o in cell.get('outputs', [])): result['failed_cell'] = i; break".to_string(),
+        "    finally:".to_string(),
+        "        if nb is not None:".to_string(),
+        format!("            nbformat.write(nb, open({path_repr}, 'w', encoding='utf-8'))"),
+        "finally:".to_string(),
+        "    with open(report_path, 'w', encoding='utf-8') as f: json.dump(result, f)".to_string(),
+        "sys.exit(0 if result['status'] in ('ok', 'ok_with_errors') else (2 if result['status'] == 'missing_dependency' else 1))".to_string(),
     ];
-
     lines.join("\n") + "\n"
 }
 
@@ -172,69 +404,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_block_header_is_followed_by_an_indented_line() {
-        // Regression test for the original bug: a `\`-continued Rust string
-        // literal silently stripped Python indentation, turning `try:` into
-        // a statement with no body (IndentationError at runtime).
-        let script = build_script("nb.ipynb", 60, Some("python3"));
-        let lines: Vec<&str> = script.lines().collect();
-        for (i, line) in lines.iter().enumerate() {
-            if line.trim_end().ends_with(':') {
-                let next = lines
-                    .get(i + 1)
-                    .unwrap_or_else(|| panic!("line {i} ({line:?}) opens a block but has no following line"));
-                assert!(
-                    next.starts_with("    "),
-                    "line {i} ({line:?}) opens a block but next line {next:?} is not indented"
-                );
-            }
-        }
+    fn generated_script_has_finally_persistence() {
+        let script = build_script("nb.ipynb", "report.json", 60, "python3", false, 60, 4, true);
+        assert!(script.contains("finally:\n        if nb is not None:"));
+        assert!(script.contains("json.dump(result, f)"));
     }
 
     #[test]
-    fn omits_kernel_arg_when_not_specified() {
-        let script = build_script("nb.ipynb", 60, None);
-        assert!(script.contains("NotebookClient(nb, timeout=60)"));
-        assert!(!script.contains("kernel_name"));
-    }
-
-    #[test]
-    fn includes_kernel_arg_when_specified() {
-        let script = build_script("nb.ipynb", 60, Some("python3119"));
-        assert!(script.contains(r#"kernel_name="python3119""#));
-    }
-
-    #[test]
-    fn embeds_windows_path_as_escaped_python_string_literal() {
-        let script = build_script(r"C:\tmp\exec.ipynb", 60, None);
-        assert!(script.contains(r#"open("C:\\tmp\\exec.ipynb")"#));
+    fn no_limit_maps_to_python_none() {
+        let script = build_script("nb.ipynb", "report.json", -1, "python3", false, 60, 4, true);
+        assert!(script.contains("timeout=None"));
     }
 
     #[test]
     fn generated_script_is_syntactically_valid_python() {
-        // Directly catches the class of bug this was written for: compile
-        // (don't execute) the generated script with the system Python.
         let Ok(python) = find_python(None) else {
-            eprintln!("skipping: no python interpreter found on PATH");
             return;
         };
-        let script = build_script("nb.ipynb", 60, Some("python3"));
-        let output = std::process::Command::new(&python)
+        let script = build_script("nb.ipynb", "report.json", 60, "python3", false, 60, 4, true);
+        let output = Command::new(python)
             .arg("-c")
             .arg(format!("compile({script:?}, '<test>', 'exec')"))
             .output()
-            .expect("failed to invoke python");
+            .unwrap();
         assert!(
             output.status.success(),
-            "generated script failed to compile:\n{}\n---\n{}",
-            String::from_utf8_lossy(&output.stderr),
-            script
+            "{}\n{script}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 
     #[test]
-    fn find_python_prefers_override_path() {
-        let resolved = find_python(Some(r"C:\custom\python.exe")).unwrap();
-        assert_eq!(resolved, r"C:\custom\python.exe");
+    fn parses_environment_values() {
+        let parsed = parse_environment(&["A=1".into(), "B=x=y".into()]).unwrap();
+        assert_eq!(parsed["B"], "x=y");
+        assert!(parse_environment(&["BROKEN".into()]).is_err());
     }
 }

@@ -1,14 +1,8 @@
-use anyhow::Result;
 use crate::notebook::Notebook;
 use crate::selection;
+use anyhow::Result;
 
-pub fn run(
-    notebook: &str,
-    sel: &str,
-    to_expr: &str,
-    backup: bool,
-    quiet: bool,
-) -> Result<()> {
+pub fn run(notebook: &str, sel: &str, to_expr: &str, backup: bool, quiet: bool) -> Result<()> {
     let mut nb = Notebook::from_file(notebook)?;
     let indices = selection::resolve(sel, nb.len())?;
 

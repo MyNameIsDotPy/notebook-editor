@@ -1,8 +1,9 @@
-use anyhow::{Context, Result};
-use regex::Regex;
 use crate::notebook::Notebook;
 use crate::selection;
+use anyhow::{Context, Result};
+use regex::Regex;
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     notebook: &str,
     sel: &str,
@@ -45,7 +46,12 @@ pub fn run(
         cells_changed += 1;
 
         if dry_run {
-            println!("[Cell {} | {}] {} replacement(s)", idx + 1, cell.cell_type, count);
+            println!(
+                "[Cell {} | {}] {} replacement(s)",
+                idx + 1,
+                cell.cell_type,
+                count
+            );
             // Show a diff-like preview
             for (line_num, (old, new)) in source.lines().zip(new_source.lines()).enumerate() {
                 if old != new {

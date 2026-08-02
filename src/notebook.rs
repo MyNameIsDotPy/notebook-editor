@@ -121,17 +121,46 @@ mod tests {
     }
 
     #[test]
+    fn save_atomically_replaces_notebook_and_can_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.ipynb");
+        std::fs::write(&path, "original").unwrap();
+        let nb = Notebook {
+            nbformat: 4,
+            nbformat_minor: 5,
+            metadata: serde_json::json!({}),
+            cells: vec![code("x = 1")],
+        };
+        nb.save(path.to_str().unwrap(), true).unwrap();
+        let saved = Notebook::from_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(saved.cells[0].source_str(), "x = 1");
+        assert_eq!(
+            std::fs::read_to_string(format!("{}.bak", path.display())).unwrap(),
+            "original"
+        );
+    }
+
+    #[test]
     fn code_cell_serializes_outputs_and_execution_count() {
         let json = serde_json::to_value(Cell::new("code")).unwrap();
         assert!(json.get("outputs").is_some(), "code cell must have outputs");
-        assert!(json.get("execution_count").is_some(), "code cell must have execution_count");
+        assert!(
+            json.get("execution_count").is_some(),
+            "code cell must have execution_count"
+        );
     }
 
     #[test]
     fn markdown_cell_omits_outputs_and_execution_count() {
         let json = serde_json::to_value(Cell::new("markdown")).unwrap();
-        assert!(json.get("outputs").is_none(), "markdown must not have outputs");
-        assert!(json.get("execution_count").is_none(), "markdown must not have execution_count");
+        assert!(
+            json.get("outputs").is_none(),
+            "markdown must not have outputs"
+        );
+        assert!(
+            json.get("execution_count").is_none(),
+            "markdown must not have execution_count"
+        );
     }
 
     #[test]
@@ -165,11 +194,22 @@ impl Notebook {
     pub fn save(&self, path: &str, backup: bool) -> Result<()> {
         if backup && Path::new(path).exists() {
             let bak = format!("{path}.bak");
-            std::fs::copy(path, &bak)
-                .with_context(|| format!("Cannot write backup '{bak}'"))?;
+            std::fs::copy(path, &bak).with_context(|| format!("Cannot write backup '{bak}'"))?;
         }
         let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, json).with_context(|| format!("Cannot write '{path}'"))?;
+        let target = Path::new(path);
+        let parent = target.parent().unwrap_or_else(|| Path::new("."));
+        let mut temp = tempfile::NamedTempFile::new_in(parent)
+            .with_context(|| format!("Cannot create temporary file beside '{path}'"))?;
+        use std::io::Write;
+        temp.write_all(json.as_bytes())
+            .with_context(|| format!("Cannot write temporary notebook for '{path}'"))?;
+        temp.as_file()
+            .sync_all()
+            .with_context(|| format!("Cannot flush temporary notebook for '{path}'"))?;
+        temp.persist(target)
+            .map_err(|e| e.error)
+            .with_context(|| format!("Cannot replace '{path}'"))?;
         Ok(())
     }
 
@@ -183,6 +223,14 @@ impl Notebook {
         self.metadata
             .get("kernelspec")
             .and_then(|k| k.get("display_name"))
+            .and_then(|v| v.as_str())
+    }
+
+    /// Kernel identifier used to resolve a registered kernelspec.
+    pub fn kernel_spec_name(&self) -> Option<&str> {
+        self.metadata
+            .get("kernelspec")
+            .and_then(|k| k.get("name"))
             .and_then(|v| v.as_str())
     }
 

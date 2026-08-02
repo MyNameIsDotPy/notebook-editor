@@ -1,6 +1,6 @@
-use anyhow::{bail, Result};
 use crate::notebook::Notebook;
 use crate::selection;
+use anyhow::{bail, Result};
 
 pub fn run(
     src: &str,
@@ -19,7 +19,10 @@ pub fn run(
     let insert_pos = match at {
         Some(n) => {
             if n == 0 || n > dst_nb.len() + 1 {
-                bail!("--at {n} is out of range (destination has {} cells)", dst_nb.len());
+                bail!(
+                    "--at {n} is out of range (destination has {} cells)",
+                    dst_nb.len()
+                );
             }
             n - 1
         }
@@ -100,6 +103,10 @@ mod tests {
         let (_dd, dst) = write_nb(&make_nb(vec![]));
         run(&src, "all", &dst, None, false, true).unwrap();
         let src_nb = Notebook::from_file(&src).unwrap();
-        assert_eq!(src_nb.cells.len(), 3, "source notebook must not be modified");
+        assert_eq!(
+            src_nb.cells.len(),
+            3,
+            "source notebook must not be modified"
+        );
     }
 }

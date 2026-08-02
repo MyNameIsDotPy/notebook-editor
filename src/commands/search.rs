@@ -1,6 +1,6 @@
+use crate::notebook::Notebook;
 use anyhow::{Context, Result};
 use regex::Regex;
-use crate::notebook::Notebook;
 
 pub fn run(
     notebook: &str,

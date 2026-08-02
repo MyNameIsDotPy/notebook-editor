@@ -1,6 +1,6 @@
-use anyhow::Result;
-use crate::notebook::{Cell, Notebook};
+use crate::notebook::Notebook;
 use crate::selection;
+use anyhow::Result;
 
 pub fn run(
     notebook: &str,
@@ -20,13 +20,12 @@ pub fn run(
     if dry_run {
         for &i in &code_indices {
             let outputs = nb.cells[i].outputs.len();
-            eprintln!(
-                "Would clear cell {} ({} output(s))",
-                i + 1,
-                outputs,
-            );
+            eprintln!("Would clear cell {} ({} output(s))", i + 1, outputs,);
         }
-        eprintln!("{} code cell(s) would be cleared (dry run)", code_indices.len());
+        eprintln!(
+            "{} code cell(s) would be cleared (dry run)",
+            code_indices.len()
+        );
         return Ok(());
     }
 
@@ -47,6 +46,7 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::notebook::Cell;
     use serde_json::Value;
 
     fn make_nb(cells: Vec<Cell>) -> Notebook {
@@ -68,7 +68,8 @@ mod tests {
     fn code_with_output(src: &str) -> Cell {
         let mut c = Cell::new("code");
         c.set_source(src.to_string());
-        c.outputs.push(serde_json::json!({"output_type": "stream", "text": "ok"}));
+        c.outputs
+            .push(serde_json::json!({"output_type": "stream", "text": "ok"}));
         c.execution_count = Some(Value::Number(1.into()));
         c
     }

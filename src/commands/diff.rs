@@ -1,5 +1,5 @@
-use anyhow::Result;
 use crate::notebook::{Cell, Notebook};
+use anyhow::Result;
 
 pub fn run(a: &str, b: &str, detailed: bool) -> Result<()> {
     let nb_a = Notebook::from_file(a)?;
@@ -129,6 +129,7 @@ fn print_source_prefixed(cell: &Cell, prefix: &str) {
     }
 }
 
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,13 +157,21 @@ mod tests {
     #[test]
     fn removed_cell_detected() {
         let ops = diff_cells(&[code("x = 1"), code("y = 2")], &[code("x = 1")]);
-        assert_eq!(ops.iter().filter(|op| matches!(op, Op::Remove(_))).count(), 1);
+        assert_eq!(
+            ops.iter().filter(|op| matches!(op, Op::Remove(_))).count(),
+            1
+        );
     }
 
     #[test]
     fn changed_cell_detected() {
         let ops = diff_cells(&[code("x = 1")], &[code("x = 99")]);
-        assert_eq!(ops.iter().filter(|op| matches!(op, Op::Change(_, _))).count(), 1);
+        assert_eq!(
+            ops.iter()
+                .filter(|op| matches!(op, Op::Change(_, _)))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -172,8 +181,16 @@ mod tests {
             &[shared.clone(), code("old")],
             &[shared.clone(), code("new")],
         );
-        assert_eq!(ops.iter().filter(|op| matches!(op, Op::Keep(_, _))).count(), 1);
-        assert_eq!(ops.iter().filter(|op| matches!(op, Op::Change(_, _))).count(), 1);
+        assert_eq!(
+            ops.iter().filter(|op| matches!(op, Op::Keep(_, _))).count(),
+            1
+        );
+        assert_eq!(
+            ops.iter()
+                .filter(|op| matches!(op, Op::Change(_, _)))
+                .count(),
+            1
+        );
     }
 }
 

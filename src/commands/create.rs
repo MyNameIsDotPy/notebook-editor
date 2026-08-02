@@ -1,5 +1,5 @@
-use anyhow::{bail, Result};
 use crate::notebook::{Cell, Notebook};
+use anyhow::{bail, Result};
 
 pub fn run(
     notebook: &str,
@@ -41,10 +41,8 @@ pub fn run(
 pub fn resolve_source(source: Option<String>, file: Option<String>) -> Result<String> {
     match (source, file) {
         (Some(s), _) => Ok(s),
-        (_, Some(f)) => {
-            Ok(std::fs::read_to_string(&f)
-                .map_err(|e| anyhow::anyhow!("Cannot read source file '{f}': {e}"))?)
-        }
+        (_, Some(f)) => Ok(std::fs::read_to_string(&f)
+            .map_err(|e| anyhow::anyhow!("Cannot read source file '{f}': {e}"))?),
         (None, None) => Ok(String::new()),
     }
 }

@@ -34,7 +34,11 @@ pub fn resolve(expr: &str, total: usize) -> Result<Vec<usize>> {
             let start = parse_index(iter.next().unwrap().trim(), total)?;
             let end = parse_index(iter.next().unwrap().trim(), total)?;
             if start > end {
-                bail!("Range start {s} is greater than end {e}", s = start + 1, e = end + 1);
+                bail!(
+                    "Range start {s} is greater than end {e}",
+                    s = start + 1,
+                    e = end + 1
+                );
             }
             indices.extend(start..=end);
         } else {

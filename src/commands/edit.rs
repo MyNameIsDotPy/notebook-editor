@@ -1,8 +1,9 @@
-use anyhow::{bail, Result};
+use super::create::resolve_source;
 use crate::notebook::Notebook;
 use crate::selection;
-use super::create::resolve_source;
+use anyhow::{bail, Result};
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     notebook: &str,
     index: usize,
@@ -20,7 +21,10 @@ pub fn run(
     let mut nb = Notebook::from_file(notebook)?;
 
     if index == 0 || index > nb.len() {
-        bail!("Cell index {index} is out of range (notebook has {} cells)", nb.len());
+        bail!(
+            "Cell index {index} is out of range (notebook has {} cells)",
+            nb.len()
+        );
     }
     let idx = index - 1;
 
@@ -47,7 +51,6 @@ pub fn run(
         if !quiet {
             eprintln!("Deleted {} line(s) from cell {index}", to_delete.len());
         }
-
     } else if let Some(after) = insert_after {
         // ── Insert lines after a given line number ─────────────────────────
         let new_content = resolve_source(source, file)?;
@@ -75,7 +78,6 @@ pub fn run(
         if !quiet {
             eprintln!("Inserted line(s) after line {after} in cell {index}");
         }
-
     } else if let Some(before) = insert_before {
         // ── Insert lines before a given line number ────────────────────────
         let new_content = resolve_source(source, file)?;
@@ -103,7 +105,6 @@ pub fn run(
         if !quiet {
             eprintln!("Inserted line(s) before line {before} in cell {index}");
         }
-
     } else if let Some(expr) = lines_expr {
         // ── Replace specific lines ─────────────────────────────────────────
         let new_content = resolve_source(source, file)?;
@@ -119,7 +120,10 @@ pub fn run(
 
         let first = line_indices[0];
         let last = *line_indices.last().unwrap();
-        all_lines.splice(first..=last, replacement_lines.iter().map(|s| s.to_string()));
+        all_lines.splice(
+            first..=last,
+            replacement_lines.iter().map(|s| s.to_string()),
+        );
 
         let mut new_src = all_lines.join("\n");
         if current.ends_with('\n') {
@@ -130,7 +134,6 @@ pub fn run(
         if !quiet {
             eprintln!("Cell {index} lines updated");
         }
-
     } else {
         // ── Full-cell replace ──────────────────────────────────────────────
         let src: Option<String> = if use_editor {

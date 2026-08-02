@@ -1,6 +1,6 @@
 [package]
 name = "nbedit"
-version = "0.5.0"
+version = "0.5.5"
 edition = "2021"
 description = "Command-line editor for Jupyter notebooks"
 license = "MIT"
@@ -16,3 +16,4 @@ serde_json = "1"
 anyhow = "1"
 tempfile = "3"
 regex = "1"
+ctrlc = "3"

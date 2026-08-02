@@ -1,6 +1,6 @@
-use anyhow::Result;
 use crate::notebook::Notebook;
 use crate::selection;
+use anyhow::Result;
 
 pub fn run(
     notebook: &str,
@@ -64,7 +64,10 @@ pub fn run(
 }
 
 fn print_output(output: &serde_json::Value) {
-    let output_type = output.get("output_type").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let output_type = output
+        .get("output_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
     match output_type {
         "stream" => {
             let text = output

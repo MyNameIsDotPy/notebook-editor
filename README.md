@@ -319,9 +319,58 @@ Exits with code `1` if no matches are found.
 
 ---
 
+### Run
+
+Execute selected code cells through a locally discovered Jupyter kernel and merge outputs, execution counts, and execution metadata back into the notebook.
+
+```sh
+nbedit run <NOTEBOOK> <SELECTION> [OPTIONS]
+```
+
+Without an override, `nbedit` ranks the notebook's configured kernelspec, workspace environments such as `.venv`, the active virtual/Conda environment, registered kernelspecs, environment-manager installations, and Python on `PATH`.
+
+```sh
+# Automatically resolve the best kernel
+nbedit run analysis.ipynb all
+
+# Use an unregistered Python environment directly
+nbedit run analysis.ipynb all --interpreter .venv/bin/python
+
+# Run setup cells before cell 8, but only update cell 8
+nbedit run analysis.ipynb 8 --include-prior
+
+# Inspect resolution without starting a kernel
+nbedit run analysis.ipynb all --dry-run
+nbedit run analysis.ipynb all --dry-run --json
+```
+
+Important options:
+
+| Option | Description |
+|---|---|
+| `--kernel <ID>` | Discovered candidate ID or registered kernelspec name |
+| `--interpreter <PATH>` | Python interpreter that runs notebook code; requires `ipykernel` |
+| `--driver-python <PATH>` | Python containing `nbclient` and `nbformat`; `--python` remains an alias |
+| `--include-prior` | Execute earlier code cells as context without updating them |
+| `--allow-errors` | Continue after cell errors and save all resulting outputs |
+| `--timeout <SECONDS>` | Per-cell limit; `-1` disables it |
+| `--overall-timeout <SECONDS>` | Wall-clock limit for the entire operation |
+| `--startup-timeout <SECONDS>` | Kernel startup limit |
+| `--iopub-timeout <SECONDS>` | Kernel output-channel limit |
+| `--no-record-timing` | Do not write execution timing metadata |
+| `--cwd <PATH>` | Override the kernel working directory |
+| `--env KEY=VALUE` | Pass an environment value; repeatable |
+| `--json` | Emit a structured execution report |
+
+The driver and kernel are separate: the driver needs `nbclient` and `nbformat`, while a discovered Python environment only needs `ipykernel`. Registered non-Python kernels use their kernelspec launch command.
+
+Exit codes are `0` for completed execution (including allowed errors), `1` for execution or cell failure, `2` for missing driver dependencies, `124` for an overall timeout, and `130` for Ctrl-C. Available partial outputs are saved when the driver can shut down cleanly.
+
+---
+
 ### Kernels
 
-List Jupyter kernels installed on this machine. The kernel name printed here is what you pass to `run --kernel`.
+Discover registered Jupyter kernels and usable Python environments on this machine.
 
 ```
 nbedit kernels
@@ -331,12 +380,19 @@ nbedit kernels
 
 | Option | Description |
 |---|---|
-| `--json` | Emit raw JSON from `jupyter kernelspec list --json` |
-| `--python <PATH>` | Path to the Python interpreter to use, overriding PATH-based `python3`/`python` auto-detection |
+| `--json` | Emit normalized candidates and resolution information as JSON |
+| `--details` | Show source, interpreter, kernelspec, and resource paths |
+| `--check` | Verify that discovered Python interpreters can import `ipykernel` |
+| `--notebook <PATH>` | Rank candidates for a particular notebook |
+| `--driver-python <PATH>` | Also inspect kernels installed under that Python prefix |
 
-Delegates to `jupyter kernelspec list`, run under whichever Python `nbedit` resolves (`python3`, falling back to `python`) — the same interpreter used by `run`. Requires Jupyter to be installed there: `pip install jupyter`.
+Discovery reads standard Jupyter user/system locations and `JUPYTER_PATH`, then adds workspace `.venv`/`venv`, Pixi and local Conda environments, active `VIRTUAL_ENV`/`CONDA_PREFIX`, Conda/Micromamba, Pyenv, Poetry, Pipenv, and Python on `PATH`. Duplicate interpreters are collapsed to one deterministic candidate.
 
-Use `--python` when the interpreter you need isn't first on `PATH` and you can't (or don't want to) reorder it — e.g. `nbedit kernels --python "C:\Users\me\AppData\Local\Programs\Python\Python311\python.exe"`.
+```sh
+nbedit kernels --details
+nbedit kernels --notebook analysis.ipynb --check
+nbedit kernels --json
+```
 
 ---
 
@@ -345,8 +401,6 @@ Use `--python` when the interpreter you need isn't first on `PATH` and you can't
 | Flag | Description |
 |---|---|
 | `--backup` | Write a `.bak` copy of the notebook before modifying it |
-| `--no-backup` | Disable automatic backup (default behavior) |
-| `--pretty` | Pretty-print the output JSON with 1-space indent (default: 1) |
 | `-q / --quiet` | Suppress confirmation messages |
 | `-v / --verbose` | Print debug information |
 

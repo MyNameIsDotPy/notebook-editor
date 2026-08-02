@@ -229,12 +229,12 @@ pub enum Command {
     ///
     /// Runs the kernel from the notebook's directory so relative paths in cell
     /// code (e.g. open("data.csv")) resolve correctly. Markdown and raw cells
-    /// are silently skipped. Kernel output streams to the terminal in real time.
+    /// are silently skipped. Cell streams are captured into notebook outputs.
     ///
     /// Requires Python with nbclient and nbformat: pip install nbclient nbformat
     ///
-    /// Exits with code 1 if a cell raised an error (outputs still saved), or
-    /// code 2 if nbclient/nbformat are not installed.
+    /// Exits with code 1 for execution failure, code 2 for missing driver
+    /// dependencies, code 124 for overall timeout, or code 130 for Ctrl-C.
     Run {
         /// Path to the notebook file
         notebook: String,
@@ -250,10 +250,53 @@ pub enum Command {
         #[arg(long)]
         kernel: Option<String>,
 
-        /// Path to the Python interpreter to drive execution with
-        /// (overrides PATH-based python3/python auto-detection)
+        /// Python interpreter that runs notebook cells (need not be registered)
         #[arg(long)]
-        python: Option<String>,
+        interpreter: Option<String>,
+
+        /// Python interpreter containing nbclient (legacy alias: --python)
+        #[arg(long = "driver-python", alias = "python")]
+        driver_python: Option<String>,
+
+        /// Continue executing later cells after a cell raises an error
+        #[arg(long)]
+        allow_errors: bool,
+
+        /// Execute preceding code cells as context, but update only selected cells
+        #[arg(long)]
+        include_prior: bool,
+
+        /// Kernel startup timeout in seconds
+        #[arg(long, default_value = "60")]
+        startup_timeout: u64,
+
+        /// IOPub-channel timeout in seconds
+        #[arg(long, default_value = "4")]
+        iopub_timeout: u64,
+
+        /// Disable nbclient execution timing metadata
+        #[arg(long)]
+        no_record_timing: bool,
+
+        /// Maximum wall-clock time for the entire execution
+        #[arg(long)]
+        overall_timeout: Option<u64>,
+
+        /// Working directory for the kernel (default: notebook directory)
+        #[arg(long)]
+        cwd: Option<String>,
+
+        /// Environment variable passed to the kernel, in KEY=VALUE form
+        #[arg(long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
+
+        /// Resolve and validate the kernel without executing cells
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Emit a machine-readable execution report
+        #[arg(long)]
+        json: bool,
     },
 
     /// Find and replace text (regex) within cell sources
@@ -289,18 +332,28 @@ pub enum Command {
 
     /// List Jupyter kernels installed on this machine
     ///
-    /// Delegates to `jupyter kernelspec list`. The kernel names printed here
-    /// are what you pass to `run --kernel`. Requires Jupyter to be installed
-    /// for whichever Python nbedit resolves (python3, falling back to python).
+    /// Discovers standard kernelspecs, workspace and active Python environments,
+    /// and environments exposed by common Python environment managers.
     Kernels {
-        /// Emit raw JSON from `jupyter kernelspec list --json`
+        /// Emit normalized discovery results as JSON
         #[arg(long)]
         json: bool,
 
-        /// Path to the Python interpreter to use
-        /// (overrides PATH-based python3/python auto-detection)
+        /// Show interpreter, source, and kernelspec details
         #[arg(long)]
-        python: Option<String>,
+        details: bool,
+
+        /// Probe Python candidates for ipykernel availability
+        #[arg(long)]
+        check: bool,
+
+        /// Rank candidates for this notebook
+        #[arg(long)]
+        notebook: Option<String>,
+
+        /// Python interpreter used to locate prefix-scoped kernelspecs
+        #[arg(long = "driver-python", alias = "python")]
+        driver_python: Option<String>,
     },
 }
 
