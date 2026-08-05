@@ -14,6 +14,8 @@ pub struct Notebook {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Cell {
+    #[serde(default)]
+    pub id: Option<String>,
     pub cell_type: String,
     #[serde(default)]
     pub metadata: Value,
@@ -29,6 +31,9 @@ impl serde::Serialize for Cell {
         use serde::ser::SerializeMap;
         let is_code = self.cell_type == "code";
         let mut map = serializer.serialize_map(None)?;
+        if let Some(id) = &self.id {
+            map.serialize_entry("id", id)?;
+        }
         map.serialize_entry("cell_type", &self.cell_type)?;
         if is_code {
             map.serialize_entry("execution_count", &self.execution_count)?;
@@ -66,6 +71,7 @@ impl Cell {
     /// Create a new blank cell of the given type.
     pub fn new(cell_type: &str) -> Self {
         Cell {
+            id: None,
             cell_type: cell_type.to_string(),
             metadata: Value::Object(Default::default()),
             source: CellSource::Lines(Vec::new()),
@@ -118,6 +124,42 @@ mod tests {
     fn source_str_roundtrip() {
         let original = "import pandas\ndf = pd.read_csv('data.csv')";
         assert_eq!(code(original).source_str(), original);
+    }
+
+    #[test]
+    fn ensure_cell_ids_adds_unique_ids_without_replacing_existing_ids() {
+        let mut first = code("a = 1");
+        first.id = Some("existing".into());
+        let mut nb = Notebook {
+            nbformat: 4,
+            nbformat_minor: 5,
+            metadata: serde_json::json!({}),
+            cells: vec![first, code("b = 2"), code("c = 3")],
+        };
+        nb.ensure_cell_ids();
+        let ids: Vec<_> = nb
+            .cells
+            .iter()
+            .map(|cell| cell.id.as_deref().unwrap())
+            .collect();
+        assert_eq!(ids[0], "existing");
+        assert_eq!(
+            ids.len(),
+            ids.iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+        );
+    }
+
+    #[test]
+    fn cell_id_roundtrips_through_json() {
+        let mut cell = code("x = 1");
+        cell.id = Some("cell-1".into());
+        let value = serde_json::to_value(&cell).unwrap();
+        assert_eq!(value["id"], "cell-1");
+        let decoded: Cell = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.id.as_deref(), Some("cell-1"));
     }
 
     #[test]
@@ -216,6 +258,26 @@ impl Notebook {
     /// Total number of cells.
     pub fn len(&self) -> usize {
         self.cells.len()
+    }
+
+    /// Add stable, nbformat-compatible IDs to legacy cells that do not have one.
+    pub fn ensure_cell_ids(&mut self) {
+        use std::collections::HashSet;
+        let mut used: HashSet<String> = self.cells.iter().filter_map(|c| c.id.clone()).collect();
+        for (index, cell) in self.cells.iter_mut().enumerate() {
+            if cell.id.is_some() {
+                continue;
+            }
+            let base = format!("nbedit-{}", index + 1);
+            let mut id = base.clone();
+            let mut suffix = 2;
+            while used.contains(&id) {
+                id = format!("{base}-{suffix}");
+                suffix += 1;
+            }
+            used.insert(id.clone());
+            cell.id = Some(id);
+        }
     }
 
     /// Kernel display name from metadata, if present.

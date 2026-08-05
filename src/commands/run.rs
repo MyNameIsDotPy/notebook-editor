@@ -49,6 +49,7 @@ pub fn run(
         bail!("--timeout must be -1 or a non-negative number");
     }
     let mut nb = Notebook::from_file(notebook)?;
+    nb.ensure_cell_ids();
     let indices = selection::resolve(selection, nb.len())?;
     let code_indices: Vec<usize> = indices
         .into_iter()
@@ -128,7 +129,7 @@ pub fn run(
         iopub_timeout,
         record_timing,
     );
-    let driver = find_python(driver_python)?;
+    let driver = find_driver_python(driver_python, &candidate)?;
     let kernel_cwd = cwd
         .map(Path::new)
         .unwrap_or_else(|| notebook_path.parent().unwrap_or_else(|| Path::new(".")));
@@ -204,6 +205,9 @@ pub fn run(
                 Some(ec.get("execution_count").cloned().unwrap_or(Value::Null));
             if let Some(metadata) = ec.get("metadata") {
                 nb.cells[nb_idx].metadata = metadata.clone();
+            }
+            if let Some(id) = ec.get("id").and_then(Value::as_str) {
+                nb.cells[nb_idx].id = Some(id.to_owned());
             }
         }
         nb.save(notebook, backup)?;
@@ -325,21 +329,80 @@ fn prepend_search_path(first: &Path, existing: Option<std::ffi::OsString>) -> st
     std::env::join_paths(paths).unwrap_or_else(|_| first.as_os_str().to_owned())
 }
 
-pub(crate) fn find_python(override_path: Option<&str>) -> Result<String> {
+fn find_driver_python(
+    override_path: Option<&str>,
+    candidate: &kernels::KernelCandidate,
+) -> Result<String> {
+    select_driver_python(override_path, candidate, python_has_driver_dependencies)
+}
+
+fn select_driver_python(
+    override_path: Option<&str>,
+    candidate: &kernels::KernelCandidate,
+    has_dependencies: impl Fn(&str) -> bool,
+) -> Result<String> {
     if let Some(path) = override_path {
-        return Ok(path.to_string());
+        return require_driver_dependencies(path, &has_dependencies);
     }
+
+    // A Python kernelspec normally points at the environment that should run
+    // the notebook. Prefer it as the nbclient driver too, avoiding a surprising
+    // and usually incorrect second Python selected from PATH.
+    if candidate
+        .language
+        .as_deref()
+        .is_some_and(|language| language.eq_ignore_ascii_case("python"))
+    {
+        if let Some(path) = candidate.interpreter.as_ref().and_then(|p| p.to_str()) {
+            if has_dependencies(path) {
+                return Ok(path.to_owned());
+            }
+        }
+    }
+
     for candidate in ["python3", "python"] {
-        if Command::new(candidate)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-        {
+        if has_dependencies(candidate) {
             return Ok(candidate.to_string());
         }
     }
-    bail!("Python not found — install Python 3 or pass --driver-python <path>")
+
+    let suggested = candidate
+        .interpreter
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "<python>".into());
+    Err(AppExit::new(
+        2,
+        format!(
+            "No Python driver with nbclient and nbformat was found. Install them for the selected kernel with:\n  \"{suggested}\" -m pip install nbclient nbformat\nor pass --driver-python <path>"
+        ),
+    )
+    .into())
+}
+
+fn require_driver_dependencies(
+    path: &str,
+    has_dependencies: impl Fn(&str) -> bool,
+) -> Result<String> {
+    if has_dependencies(path) {
+        Ok(path.to_owned())
+    } else {
+        Err(AppExit::new(
+            2,
+            format!(
+                "Driver Python '{path}' cannot import nbclient and nbformat. Install them with:\n  \"{path}\" -m pip install nbclient nbformat"
+            ),
+        )
+        .into())
+    }
+}
+
+fn python_has_driver_dependencies(path: &str) -> bool {
+    Command::new(path)
+        .args(["-c", "import nbclient, nbformat"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -367,6 +430,9 @@ fn build_script(
     let record_timing = if record_timing { "True" } else { "False" };
     let lines = vec![
         "import json, sys, traceback".to_string(),
+        "if sys.platform == 'win32':".to_string(),
+        "    import asyncio".to_string(),
+        "    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())".to_string(),
         format!("report_path = {report_repr}"),
         "result = {'status': 'driver_failure', 'execution_started': False}".to_string(),
         "nb = None".to_string(),
@@ -418,7 +484,13 @@ mod tests {
 
     #[test]
     fn generated_script_is_syntactically_valid_python() {
-        let Ok(python) = find_python(None) else {
+        let Some(python) = ["python3", "python"].into_iter().find(|candidate| {
+            Command::new(candidate)
+                .arg("--version")
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false)
+        }) else {
             return;
         };
         let script = build_script("nb.ipynb", "report.json", 60, "python3", false, 60, 4, true);
@@ -439,5 +511,39 @@ mod tests {
         let parsed = parse_environment(&["A=1".into(), "B=x=y".into()]).unwrap();
         assert_eq!(parsed["B"], "x=y");
         assert!(parse_environment(&["BROKEN".into()]).is_err());
+    }
+
+    #[test]
+    fn windows_driver_uses_selector_event_loop_policy() {
+        let script = build_script("nb.ipynb", "report.json", 60, "python3", false, 60, 4, true);
+        assert!(script.contains("WindowsSelectorEventLoopPolicy"));
+        assert!(
+            script.find("WindowsSelectorEventLoopPolicy").unwrap()
+                < script.find("import nbformat").unwrap()
+        );
+    }
+
+    #[test]
+    fn selected_python_kernel_interpreter_is_preferred_as_driver() {
+        let interpreter = if cfg!(windows) {
+            r"C:\Python311\python.exe"
+        } else {
+            "/opt/python311/bin/python"
+        };
+        let candidate = kernels::KernelCandidate {
+            id: "kernelspec:python311".into(),
+            display_name: "Python 3.11".into(),
+            language: Some("python".into()),
+            source: kernels::KernelSource::Registered,
+            kernelspec_name: Some("python311".into()),
+            interpreter: Some(interpreter.into()),
+            argv: vec![],
+            resource_dir: None,
+            usable: true,
+            reason: None,
+            score: 0,
+        };
+        let selected = select_driver_python(None, &candidate, |path| path == interpreter).unwrap();
+        assert_eq!(selected, interpreter);
     }
 }

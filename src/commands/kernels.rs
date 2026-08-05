@@ -268,7 +268,14 @@ fn discover_registered(out: &mut Vec<KernelCandidate>, driver_python: Option<&st
                         .collect()
                 })
                 .unwrap_or_default();
-            let interpreter = argv.first().map(PathBuf::from).filter(|p| p.is_absolute());
+            let interpreter = argv.first().and_then(|value| {
+                let path = PathBuf::from(value);
+                if path.is_absolute() {
+                    Some(path)
+                } else {
+                    executable_on_path(value)
+                }
+            });
             out.push(KernelCandidate {
                 id: format!("kernelspec:{name}"),
                 display_name: spec

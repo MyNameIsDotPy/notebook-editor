@@ -362,7 +362,7 @@ Important options:
 | `--env KEY=VALUE` | Pass an environment value; repeatable |
 | `--json` | Emit a structured execution report |
 
-The driver and kernel are separate: the driver needs `nbclient` and `nbformat`, while a discovered Python environment only needs `ipykernel`. Registered non-Python kernels use their kernelspec launch command.
+The driver and kernel are separate processes: the driver needs `nbclient` and `nbformat`, while a Python kernel needs `ipykernel`. For Python kernels, `nbedit` automatically prefers the interpreter recorded in the selected kernelspec as the driver when it has the required packages. `--driver-python` is only an override. Registered non-Python kernels use their kernelspec launch command while `nbedit` discovers a suitable Python driver independently.
 
 Exit codes are `0` for completed execution (including allowed errors), `1` for execution or cell failure, `2` for missing driver dependencies, `124` for an overall timeout, and `130` for Ctrl-C. Available partial outputs are saved when the driver can shut down cleanly.
 
