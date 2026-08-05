@@ -20,16 +20,19 @@ jobs:
             os: ubuntu-latest
             cross: false
             artifact: nbedit-linux-x86_64
+            mcp_artifact: nbedit-mcp-linux-x86_64
 
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             cross: true
             artifact: nbedit-linux-aarch64
+            mcp_artifact: nbedit-mcp-linux-aarch64
 
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             cross: false
             artifact: nbedit-windows-x86_64.exe
+            mcp_artifact: nbedit-mcp-windows-x86_64.exe
 
     steps:
       - name: Checkout
@@ -56,17 +59,21 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           cp target/${{ matrix.target }}/release/nbedit ${{ matrix.artifact }}
+          cp target/${{ matrix.target }}/release/nbedit-mcp ${{ matrix.mcp_artifact }}
 
       - name: Rename binary (Windows)
         if: runner.os == 'Windows'
         run: |
           cp target/${{ matrix.target }}/release/nbedit.exe ${{ matrix.artifact }}
+          cp target/${{ matrix.target }}/release/nbedit-mcp.exe ${{ matrix.mcp_artifact }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}
+            ${{ matrix.mcp_artifact }}
 
   release:
     name: Create Release

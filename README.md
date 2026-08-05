@@ -406,6 +406,59 @@ nbedit kernels --json
 
 ---
 
+## MCP server
+
+`nbedit-mcp` is a native [Model Context Protocol](https://modelcontextprotocol.io/) stdio server for notebook-aware AI clients. It shares the same Rust notebook, kernel-discovery, and execution implementation as the CLI; it does not invoke `nbedit` as a subprocess.
+
+Start it with a workspace boundary:
+
+```sh
+nbedit-mcp --root /absolute/path/to/project
+```
+
+Example MCP client configuration:
+
+```json
+{
+  "mcpServers": {
+    "notebooks": {
+      "command": "/absolute/path/to/nbedit-mcp",
+      "args": ["--root", "/absolute/path/to/project"]
+    }
+  }
+}
+```
+
+On Windows, use the executable and Windows paths:
+
+```json
+{
+  "mcpServers": {
+    "notebooks": {
+      "command": "C:\\Tools\\nbedit-mcp.exe",
+      "args": ["--root", "C:\\Users\\me\\project"]
+    }
+  }
+}
+```
+
+Available tools:
+
+| Tool | Capability |
+|---|---|
+| `notebook_info` | Notebook format, cell counts, and configured kernel |
+| `notebook_read` | Structured selected-cell reading |
+| `notebook_create_cell` | Insert code, markdown, or raw cells |
+| `notebook_edit_cell` | Replace cell source or type |
+| `notebook_delete_cells` | Delete a cell selection |
+| `notebook_clear_outputs` | Clear code-cell outputs and counts |
+| `notebook_list_kernels` | Discover kernels and Python environments |
+| `notebook_run_cells` | Explicitly execute trusted cells and return outputs |
+
+Notebooks are also exposed as `notebook:///{path}` resources. Paths are canonicalized and restricted to `--root`; parent traversal and symlink escapes are rejected. Mutating tools create `.bak` files by default. The server never installs packages automatically. Kernel execution runs local notebook code with the permissions of the MCP server process and should only be enabled for trusted workspaces.
+
+---
+
 ## Installation
 
 ### From source
@@ -432,6 +485,9 @@ Download the latest binary for your platform from the [Releases](https://github.
 | `nbedit-linux-x86_64` | Linux x86_64 (Ubuntu, Arch, Debian, …) |
 | `nbedit-linux-aarch64` | Linux ARM64 |
 | `nbedit-windows-x86_64.exe` | Windows x86_64 |
+| `nbedit-mcp-linux-x86_64` | MCP server, Linux x86_64 |
+| `nbedit-mcp-linux-aarch64` | MCP server, Linux ARM64 |
+| `nbedit-mcp-windows-x86_64.exe` | MCP server, Windows x86_64 |
 
 ```sh
 # Linux example

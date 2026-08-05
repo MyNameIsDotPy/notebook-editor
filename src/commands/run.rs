@@ -9,9 +9,11 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+static CTRL_C_HANDLER: OnceLock<std::result::Result<(), String>> = OnceLock::new();
 
 #[derive(Serialize)]
 struct ExecutionReport {
@@ -161,8 +163,13 @@ pub fn run(
     }
     command.envs(env);
     INTERRUPTED.store(false, Ordering::SeqCst);
-    ctrlc::set_handler(|| INTERRUPTED.store(true, Ordering::SeqCst))
-        .context("Cannot install Ctrl-C handler")?;
+    CTRL_C_HANDLER
+        .get_or_init(|| {
+            ctrlc::set_handler(|| INTERRUPTED.store(true, Ordering::SeqCst))
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(|error| anyhow::anyhow!("Cannot install Ctrl-C handler: {error}"))?;
     let (status, wall_timed_out, interrupted) = wait_for_child(command, overall_timeout)
         .with_context(|| format!("Failed to launch '{driver}'"))?;
 

@@ -9,6 +9,10 @@ license = "MIT"
 name = "nbedit"
 path = "src/main.rs"
 
+[[bin]]
+name = "nbedit-mcp"
+path = "src/bin/nbedit-mcp.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

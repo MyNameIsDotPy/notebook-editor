@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Top-level notebook structure (nbformat 4)
@@ -24,6 +25,8 @@ pub struct Cell {
     pub execution_count: Option<Value>,
     #[serde(default)]
     pub outputs: Vec<Value>,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 impl serde::Serialize for Cell {
@@ -43,6 +46,9 @@ impl serde::Serialize for Cell {
             map.serialize_entry("outputs", &self.outputs)?;
         }
         map.serialize_entry("source", &self.source)?;
+        for (key, value) in &self.extra {
+            map.serialize_entry(key, value)?;
+        }
         map.end()
     }
 }
@@ -81,6 +87,7 @@ impl Cell {
                 None
             },
             outputs: Vec::new(),
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -160,6 +167,20 @@ mod tests {
         assert_eq!(value["id"], "cell-1");
         let decoded: Cell = serde_json::from_value(value).unwrap();
         assert_eq!(decoded.id.as_deref(), Some("cell-1"));
+    }
+
+    #[test]
+    fn cell_attachments_and_unknown_fields_are_preserved() {
+        let value = serde_json::json!({
+            "id": "image-cell", "cell_type": "markdown", "metadata": {},
+            "source": ["![plot](attachment:plot.png)"],
+            "attachments": {"plot.png": {"image/png": "abc"}},
+            "custom_extension": {"enabled": true}
+        });
+        let cell: Cell = serde_json::from_value(value.clone()).unwrap();
+        let encoded = serde_json::to_value(cell).unwrap();
+        assert_eq!(encoded["attachments"], value["attachments"]);
+        assert_eq!(encoded["custom_extension"], value["custom_extension"]);
     }
 
     #[test]
@@ -258,6 +279,10 @@ impl Notebook {
     /// Total number of cells.
     pub fn len(&self) -> usize {
         self.cells.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cells.is_empty()
     }
 
     /// Add stable, nbformat-compatible IDs to legacy cells that do not have one.
