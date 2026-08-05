@@ -1,6 +1,6 @@
 ---
 name: nbedit
-description: Use when the user asks about nbedit, how to read/edit/create/delete/move/search/replace/run cells or lines in a Jupyter notebook from the CLI, how to list installed Jupyter kernels, or how to use notebook-editor. Covers all nbedit subcommands (read, create, edit, delete, move, info, search, replace, clear, copy, diff, run, kernels), line-level operations (--lines, --insert-after, --insert-before, --delete-lines), regex search and replace with capture groups, cell selection syntax, global flags, and build/install instructions.
+description: Use when working with notebook-editor or nbedit to inspect, edit, search, diff, execute, or manage Jupyter notebooks; discover or resolve local kernels and Python environments; configure or use the native nbedit MCP server; or troubleshoot notebook execution. Covers the CLI, cell and line selections, automatic driver/kernel resolution, structured execution, MCP tools/resources, workspace safety, and build/test workflows.
 ---
 
 # nbedit — notebook-editor skill
@@ -19,6 +19,7 @@ cargo build
 # Release build
 cargo build --release
 ./target/release/nbedit --help
+./target/release/nbedit-mcp --help
 
 # Install globally as `nbedit`
 cargo install --path .
@@ -264,73 +265,32 @@ nbedit diff original.ipynb modified.ipynb --detailed
 nbedit run <NOTEBOOK> <SELECTION> [OPTIONS]
 ```
 
-Executes selected code cells via a Jupyter kernel (using `nbclient`) and writes the
-outputs and execution counts back into the notebook. Markdown and raw cells in the
-selection are skipped. Requires Python 3 with `nbclient` and `nbformat` installed:
-
 ```sh
-pip install nbclient nbformat
-```
-
-| Option | Default | Description |
-|---|---|---|
-| `--timeout <N>` | `-1` | Per-cell execution timeout in seconds (-1 for no limit) |
-| `--kernel <NAME>` | from notebook | Override the *execution* kernel (which language/env runs the cells — any registered kernelspec, e.g. an R kernel) |
-| `--python <PATH>` | PATH auto-detect | Override the *driver* interpreter (always Python — runs `nbclient`/`nbformat` to orchestrate execution) |
-
-`--kernel` and `--python` are independent: `--kernel` picks what executes the notebook's
-cells (any language), while `--python` picks what drives the orchestration (always Python,
-regardless of the cells' language). The driver defaults to `python3`, falling back to
-`python`, resolved via `PATH`; use `--python` when the interpreter you need isn't first on
-`PATH` and you can't reorder it (e.g. locked-down machines).
-
-The kernel process runs with the notebook's directory as its working directory, so
-relative paths inside notebook code (e.g. `open("data.csv")`) resolve correctly.
-Output from the kernel streams to the terminal in real time.
-
-```sh
-# Execute cell 3
-nbedit run analysis.ipynb 3
-
-# Execute all cells (no timeout by default)
 nbedit run analysis.ipynb all
-
-# Execute all cells with a 60-second timeout
-nbedit run analysis.ipynb all --timeout 60
-
-# Execute cells 1-5 using a specific kernel
-nbedit run analysis.ipynb 1-5 --kernel python3
-
-# Drive execution with a specific Python interpreter, not the one first on PATH
-nbedit run analysis.ipynb all --python "C:\Users\me\AppData\Local\Programs\Python\Python311\python.exe"
+nbedit run analysis.ipynb 8 --include-prior
+nbedit run analysis.ipynb all --dry-run --json
 ```
 
-Exits with code `1` if any cell raised an exception (outputs are still saved).
-Exits with code `2` if `nbclient`/`nbformat` are not installed.
+Resolve kernels and drivers automatically; use explicit overrides only when needed.
+Read [references/execution-and-mcp.md](references/execution-and-mcp.md) for execution
+flags, dependency rules, troubleshooting, and MCP operation.
 
 ---
 
-### `kernels` — list installed Jupyter kernels
+### `kernels` — discover kernels and Python environments
 
 ```sh
 nbedit kernels [OPTIONS]
 ```
 
-Delegates to `jupyter kernelspec list`, run under whichever Python `nbedit` resolves
-(`python3`, falling back to `python`) — the same interpreter `run` uses to drive
-execution. The kernel names printed here are what you pass to `run --kernel`.
-Requires Jupyter installed for that interpreter: `pip install jupyter`.
-
-| Option | Description |
-|---|---|
-| `--json` | Emit raw JSON from `jupyter kernelspec list --json` |
-| `--python <PATH>` | Override PATH-based `python3`/`python` auto-detection |
-
 ```sh
 nbedit kernels
-nbedit kernels --json
-nbedit kernels --python "C:\Users\me\AppData\Local\Programs\Python\Python311\python.exe"
+nbedit kernels --details --check
+nbedit kernels --notebook analysis.ipynb --json
 ```
+
+Discover registered kernels and local Python environments. See
+[references/execution-and-mcp.md](references/execution-and-mcp.md) for sources and ranking.
 
 ---
 
@@ -449,13 +409,23 @@ nbedit delete report.ipynb last --backup
 
 ---
 
+## Native MCP server
+
+Prefer connected MCP tools over shell construction because their arguments and results
+are structured. Read [references/execution-and-mcp.md](references/execution-and-mcp.md)
+before configuring the server or invoking execution tools.
+
+---
+
 ## Exit codes
 
-| Code | Meaning                                                                 |
-|------|-------------------------------------------------------------------------|
-| 0    | Success                                                                 |
-| 1    | Runtime error (file not found, bad format, out of range) — or no matches found by `search`/`replace` |
-| 2    | Bad CLI arguments (clap)                                                |
+| Code | Meaning |
+|---|---|
+| 0 | Success |
+| 1 | Command, execution, or cell failure; also no matches/differences where documented |
+| 2 | Missing run-driver dependencies; clap also uses 2 for invalid CLI syntax |
+| 124 | Overall run timeout |
+| 130 | Run interrupted with Ctrl-C |
 
 ---
 
@@ -463,9 +433,12 @@ nbedit delete report.ipynb last --backup
 
 ```
 src/
-  main.rs          entry point
+  main.rs          CLI entry point
+  lib.rs           shared library surface
+  mcp.rs           MCP tools, resources, protocol, and workspace confinement
+  bin/nbedit-mcp.rs MCP stdio entry point
   cli.rs           clap argument definitions
-  notebook.rs      Notebook/Cell structs + serde (nbformat 4)
+  notebook.rs      nbformat model, atomic saves, IDs, attachments/extensions
   selection.rs     selection expression parser (unit-tested)
   error.rs         NbError enum
   commands/
@@ -478,9 +451,11 @@ src/
     info.rs
     search.rs      regex search via the `regex` crate
     replace.rs     regex find & replace with capture group support
+    kernels.rs     environment discovery, ranking, synthetic kernelspecs
+    run.rs         driver resolution and hardened nbclient execution
 ```
 
-Key crates: `clap 4` (derive), `serde`/`serde_json`, `anyhow`, `tempfile`, `regex`.
+Key crates: `clap`, `serde`/`serde_json`, `anyhow`, `tempfile`, `regex`, `ctrlc`.
 
 ---
 
@@ -488,6 +463,8 @@ Key crates: `clap 4` (derive), `serde`/`serde_json`, `anyhow`, `tempfile`, `rege
 
 ```sh
 cargo test
+cargo clippy --all-targets -- -D warnings
 ```
 
-16 unit tests: 8 in `src/selection.rs`, 4 in `src/commands/search.rs`, 4 in `src/commands/replace.rs`.
+Tests cover selections, notebook preservation and atomic saves, command behavior,
+kernel ranking, driver selection, generated Python, and MCP protocol/path safety.

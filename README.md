@@ -2,7 +2,7 @@
 
 A command-line tool written in Rust for editing Jupyter notebooks (`.ipynb`) from the terminal. Manipulate individual cells or ranges without opening a GUI.
 
-> Also available as an **[opencode](https://opencode.ai) skill** — lets AI agents read, create, edit, delete and move notebook cells directly from a coding session. See [Use as an opencode skill](#use-as-an-opencode-skill).
+> Also available as an **[opencode](https://opencode.ai) skill** and a native **MCP server** — letting AI agents inspect, edit, discover kernels for, and explicitly execute notebooks from a coding session. See [MCP server](#mcp-server) and [Use as an opencode skill](#use-as-an-opencode-skill).
 
 ---
 
@@ -503,6 +503,7 @@ sudo mv nbedit-linux-x86_64 /usr/local/bin/nbedit
 
 - Kernel and language metadata
 - Cell metadata and tags
+- Cell IDs, attachments, and extension fields
 - Cell outputs and execution counts
 - Notebook-level metadata
 
@@ -514,18 +515,19 @@ Only the fields explicitly targeted by a command are mutated.
 
 ```
 src/
-  main.rs          -- CLI entry point (clap)
+  main.rs          -- CLI entry point
+  lib.rs           -- Shared library surface
+  mcp.rs           -- MCP tools, resources, protocol and path confinement
+  bin/
+    nbedit-mcp.rs  -- MCP stdio entry point
   cli.rs           -- Argument definitions and subcommand enum
-  notebook.rs      -- Notebook and Cell data model (serde)
+  notebook.rs      -- nbformat model and atomic persistence
   selection.rs     -- Parsing and evaluation of cell selection expressions
   commands/
-    read.rs
-    create.rs
-    edit.rs
-    delete.rs
-    move.rs
-    info.rs
-  error.rs         -- Unified error type
+    kernels.rs     -- Kernel/environment discovery and ranking
+    run.rs         -- Driver resolution and notebook execution
+    ...            -- Notebook reading and mutation commands
+  error.rs         -- Application errors and exit codes
 ```
 
 **Key dependencies**
@@ -535,7 +537,9 @@ src/
 | `clap` | CLI argument parsing |
 | `serde` / `serde_json` | JSON serialization of `.ipynb` files |
 | `anyhow` | Error handling |
-| `tempfile` | Temporary files for `--editor` mode |
+| `tempfile` | Atomic saves and execution/editor files |
+| `regex` | Search and replacement |
+| `ctrlc` | Graceful execution interruption |
 
 ---
 
@@ -544,10 +548,10 @@ src/
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 1 | Usage error (bad arguments) |
-| 2 | File not found or unreadable |
-| 3 | Invalid notebook format |
-| 4 | Cell index out of range |
+| 1 | Command, execution, or cell failure; differences/no matches where documented |
+| 2 | Invalid CLI syntax or missing run-driver dependencies |
+| 124 | Overall execution timeout |
+| 130 | Execution interrupted with Ctrl-C |
 
 ---
 
@@ -606,8 +610,10 @@ Once the skill is loaded, opencode will automatically activate it whenever you a
 - *"Delete the last cell"*
 - *"Add a markdown cell before cell 3"*
 - *"Move cells 4-6 to the end"*
+- *"Find the best kernel and run all cells"*
+- *"Configure the native MCP server for this workspace"*
 
-The skill documents every subcommand, flag, selection syntax, exit codes and the source layout — giving the agent everything it needs to use `nbedit` correctly without guessing.
+The skill documents the CLI, automatic kernel and driver resolution, execution controls, MCP tools/resources, safety boundaries, selection syntax, and source layout—giving the agent enough procedural context to use `nbedit` without guessing.
 
 ---
 
