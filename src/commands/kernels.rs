@@ -40,6 +40,16 @@ impl KernelCandidate {
     }
 }
 
+/// `Path::parent()` returns `Some("")` for a bare relative filename like
+/// `"notebook.ipynb"`, not `None` — callers that then check `is_dir()` on
+/// that result see a bogus empty path. Normalize that case to `.`.
+pub(crate) fn parent_or_current(path: &Path) -> &Path {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
+
 pub fn run(
     json: bool,
     details: bool,
@@ -48,7 +58,7 @@ pub fn run(
     driver_python: Option<&str>,
 ) -> Result<()> {
     let workspace = notebook
-        .and_then(|p| Path::new(p).parent())
+        .map(|p| parent_or_current(Path::new(p)))
         .unwrap_or_else(|| Path::new("."));
     let nb = notebook.map(Notebook::from_file).transpose()?;
     let mut candidates = discover(workspace, driver_python)?;
@@ -130,7 +140,7 @@ pub fn resolve(
         return Ok(candidate);
     }
 
-    let workspace = notebook_path.parent().unwrap_or_else(|| Path::new("."));
+    let workspace = parent_or_current(notebook_path);
     let mut candidates = discover(workspace, driver_python)?;
     rank(&mut candidates, Some(notebook), workspace);
 
@@ -541,12 +551,15 @@ fn jupyter_data_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-pub fn install_synthetic_spec(root: &Path, candidate: &KernelCandidate) -> Result<String> {
+pub fn install_synthetic_spec(
+    root: &Path,
+    name: &str,
+    candidate: &KernelCandidate,
+) -> Result<String> {
     let interpreter = candidate
         .interpreter
         .as_ref()
         .context("synthetic kernel missing interpreter")?;
-    let name = "nbedit-env";
     let dir = root.join("kernels").join(name);
     std::fs::create_dir_all(&dir)?;
     let spec = serde_json::json!({
@@ -561,6 +574,19 @@ pub fn install_synthetic_spec(root: &Path, candidate: &KernelCandidate) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parent_or_current_normalizes_bare_filenames_to_dot() {
+        assert_eq!(
+            parent_or_current(Path::new("notebook.ipynb")),
+            Path::new(".")
+        );
+        assert_eq!(
+            parent_or_current(Path::new("dir/notebook.ipynb")),
+            Path::new("dir")
+        );
+        assert_eq!(parent_or_current(Path::new("/")), Path::new("."));
+    }
 
     #[test]
     fn finds_python_in_unix_and_windows_prefixes() {

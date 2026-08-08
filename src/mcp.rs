@@ -1,4 +1,4 @@
-use crate::commands::{kernels, run};
+use crate::commands::{kernels, run, session};
 use crate::notebook::{Cell, Notebook};
 use crate::selection;
 use anyhow::{bail, Context, Result};
@@ -88,7 +88,7 @@ impl McpServer {
             "protocolVersion": version,
             "capabilities": {"tools": {}, "resources": {}},
             "serverInfo": {"name": "nbedit-mcp", "version": env!("CARGO_PKG_VERSION")},
-            "instructions": "Read, edit, and explicitly execute Jupyter notebooks inside the configured workspace root. Execution runs local notebook code and should only be requested for trusted notebooks."
+            "instructions": "Read, edit, and explicitly execute Jupyter notebooks inside the configured workspace root. Execution runs local notebook code and should only be requested for trusted notebooks. notebook_run_cells is stateless by default (a fresh kernel per call); pass 'session' to run against a persistent kernel started with notebook_session_start instead, which keeps variables and imports alive across calls until notebook_session_stop. Treat an active session as accumulating arbitrary code and state between calls, under the same trust bar as execution itself."
         })
     }
 
@@ -107,6 +107,9 @@ impl McpServer {
             "notebook_clear_outputs" => self.notebook_clear_outputs(&arguments),
             "notebook_list_kernels" => self.notebook_list_kernels(&arguments),
             "notebook_run_cells" => self.notebook_run_cells(&arguments),
+            "notebook_session_start" => self.notebook_session_start(&arguments),
+            "notebook_session_list" => self.notebook_session_list(&arguments),
+            "notebook_session_stop" => self.notebook_session_stop(&arguments),
             _ => bail!("Unknown tool '{name}'"),
         };
         Ok(match outcome {
@@ -288,12 +291,73 @@ impl McpServer {
             false,
             backup(args),
             true,
+            args.get("session").and_then(Value::as_str),
+            args.get("create_session")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         )?;
         let nb = Notebook::from_file(path_str(&path)?)?;
         let indices = selection::resolve(expression, nb.len())?;
         let cells: Vec<Value> = indices.into_iter().filter(|&i| nb.cells[i].cell_type == "code")
             .map(|index| json!({"index": index + 1, "execution_count": nb.cells[index].execution_count, "outputs": nb.cells[index].outputs})).collect();
-        Ok(json!({"status": "ok", "path": relative_display(&self.root, &path), "cells": cells}))
+        Ok(json!({
+            "status": "ok", "path": relative_display(&self.root, &path), "cells": cells,
+            "session": args.get("session").and_then(Value::as_str),
+        }))
+    }
+
+    fn notebook_session_start(&self, args: &Value) -> Result<Value> {
+        let notebook_path = match args.get("path").and_then(Value::as_str) {
+            Some(_) => Some(self.notebook_path(args)?),
+            None => None,
+        };
+        // Never inherit the MCP server process's ambient working directory:
+        // default the kernel's cwd to the notebook's directory, or the
+        // configured workspace root, so it always stays inside --root.
+        let cwd = notebook_path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.root.clone());
+        let record = session::start_and_get(
+            args.get("name").and_then(Value::as_str),
+            args.get("kernel").and_then(Value::as_str),
+            args.get("interpreter").and_then(Value::as_str),
+            args.get("driver_python").and_then(Value::as_str),
+            notebook_path.as_deref(),
+            Some(path_str(&cwd)?),
+            &[],
+            args.get("startup_timeout")
+                .and_then(Value::as_u64)
+                .unwrap_or(60),
+        )?;
+        Ok(json!({
+            "id": record.id, "name": record.name, "kernel": record.kernel_label,
+            "display_name": record.display_name, "language": record.language, "pid": record.pid,
+        }))
+    }
+
+    fn notebook_session_list(&self, _args: &Value) -> Result<Value> {
+        let rows = session::list_records()?;
+        let sessions: Vec<Value> = rows
+            .iter()
+            .map(|(record, alive)| {
+                json!({
+                    "id": record.id, "name": record.name, "kernel": record.kernel_label,
+                    "display_name": record.display_name, "language": record.language,
+                    "pid": record.pid, "cwd": record.cwd, "created_at": record.created_at,
+                    "alive": alive,
+                })
+            })
+            .collect();
+        Ok(json!({"sessions": sessions}))
+    }
+
+    fn notebook_session_stop(&self, args: &Value) -> Result<Value> {
+        let name = required_str(args, "name")?;
+        let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
+        session::stop(name, force)?;
+        Ok(json!({"status": "ok", "name": name}))
     }
 
     fn notebook_path(&self, args: &Value) -> Result<PathBuf> {
@@ -395,8 +459,37 @@ fn tool_definitions() -> Vec<Value> {
                     "kernel": string_prop("Kernelspec name or discovered kernel ID"), "interpreter": string_prop("Python kernel interpreter"),
                     "driver_python": string_prop("Explicit nbclient driver Python"), "timeout": integer_prop("Per-cell seconds; -1 disables"),
                     "overall_timeout": integer_prop("Overall execution seconds"), "allow_errors": bool_prop("Continue after cell errors"),
-                    "include_prior": bool_prop("Execute prior code cells as context")
+                    "include_prior": bool_prop("Execute prior code cells as context"),
+                    "session": string_prop("Run against a persistent kernel session (see notebook_session_start) instead of a one-shot kernel"),
+                    "create_session": bool_prop("Create the session if it doesn't exist yet; only meaningful together with session")
                 }),
+            ),
+        ),
+        tool(
+            "notebook_session_start",
+            "Start a persistent kernel session; state (variables, imports) persists across later notebook_run_cells calls that pass the same session name, until notebook_session_stop",
+            schema(
+                &[],
+                json!({
+                    "name": string_prop("Session name; a random id is used if omitted"),
+                    "path": string_prop("Optional workspace-relative .ipynb path used only to rank kernel candidates"),
+                    "kernel": string_prop("Kernelspec name or discovered kernel ID"), "interpreter": string_prop("Python kernel interpreter"),
+                    "driver_python": string_prop("Explicit nbclient driver Python"),
+                    "startup_timeout": integer_prop("Kernel startup timeout in seconds; default 60")
+                }),
+            ),
+        ),
+        tool(
+            "notebook_session_list",
+            "List known kernel sessions and whether their kernel is still alive",
+            schema(&[], json!({})),
+        ),
+        tool(
+            "notebook_session_stop",
+            "Stop a kernel session and shut down its kernel",
+            schema(
+                &["name"],
+                json!({"name": string_prop("Session name or id"), "force": bool_prop("Skip the graceful shutdown and kill the kernel process directly")}),
             ),
         ),
     ]

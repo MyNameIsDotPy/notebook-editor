@@ -263,7 +263,7 @@ pub enum Command {
         allow_errors: bool,
 
         /// Execute preceding code cells as context, but update only selected cells
-        #[arg(long)]
+        #[arg(long, conflicts_with = "session")]
         include_prior: bool,
 
         /// Kernel startup timeout in seconds
@@ -297,6 +297,14 @@ pub enum Command {
         /// Emit a machine-readable execution report
         #[arg(long)]
         json: bool,
+
+        /// Execute against a persistent kernel session instead of a one-shot kernel
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Create the session if it doesn't exist yet (requires --session)
+        #[arg(long, requires = "session")]
+        create_session: bool,
     },
 
     /// Find and replace text (regex) within cell sources
@@ -354,6 +362,75 @@ pub enum Command {
         /// Python interpreter used to locate prefix-scoped kernelspecs
         #[arg(long = "driver-python", alias = "python")]
         driver_python: Option<String>,
+    },
+
+    /// Manage persistent kernel sessions used by `run --session`
+    ///
+    /// A session keeps a kernel process running across separate `nbedit run`
+    /// invocations, so variables and imports persist between them. Sessions run
+    /// until explicitly stopped.
+    Session {
+        #[command(subcommand)]
+        action: SessionAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SessionAction {
+    /// Start a persistent kernel and register it as a session
+    Start {
+        /// Session name used to reference it later; a random id if omitted
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Kernel name override (default: automatic)
+        #[arg(long)]
+        kernel: Option<String>,
+
+        /// Python interpreter that runs notebook cells (need not be registered)
+        #[arg(long)]
+        interpreter: Option<String>,
+
+        /// Python interpreter containing nbclient (legacy alias: --python)
+        #[arg(long = "driver-python", alias = "python")]
+        driver_python: Option<String>,
+
+        /// Notebook used only to rank kernel candidates when resolving automatically
+        #[arg(long)]
+        notebook: Option<String>,
+
+        /// Working directory for the kernel (default: current directory)
+        #[arg(long)]
+        cwd: Option<String>,
+
+        /// Environment variable passed to the kernel, in KEY=VALUE form
+        #[arg(long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
+
+        /// Kernel startup timeout in seconds
+        #[arg(long, default_value = "60")]
+        startup_timeout: u64,
+
+        /// Emit a machine-readable result
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List known sessions and whether their kernel is still alive
+    List {
+        /// Emit normalized session records as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Stop a session and shut down its kernel
+    Stop {
+        /// Session name or id
+        name: String,
+
+        /// Skip the graceful shutdown and kill the kernel process directly by PID
+        #[arg(long)]
+        force: bool,
     },
 }
 

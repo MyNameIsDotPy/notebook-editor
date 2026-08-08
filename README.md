@@ -342,6 +342,12 @@ nbedit run analysis.ipynb 8 --include-prior
 # Inspect resolution without starting a kernel
 nbedit run analysis.ipynb all --dry-run
 nbedit run analysis.ipynb all --dry-run --json
+
+# Run against a persistent kernel so state survives across invocations
+nbedit session start --name demo --interpreter .venv/bin/python
+nbedit run analysis.ipynb 1 --session demo
+nbedit run analysis.ipynb 2 --session demo
+nbedit session stop demo
 ```
 
 Important options:
@@ -361,6 +367,10 @@ Important options:
 | `--cwd <PATH>` | Override the kernel working directory |
 | `--env KEY=VALUE` | Pass an environment value; repeatable |
 | `--json` | Emit a structured execution report |
+| `--session <NAME>` | Run against a persistent kernel session instead of a one-shot kernel; see [Session](#session) |
+| `--create-session` | With `--session`, create it if it doesn't already exist |
+
+By default every `run` is stateless: a fresh kernel starts, executes the selection, and shuts down within the call. `--session` runs against a long-lived kernel started with `nbedit session start` instead, so variables and imports from one `run` are still there for the next. `--include-prior` and `--session` cannot be combined — with a session, prior state already lives in the kernel.
 
 The driver and kernel are separate processes: the driver needs `nbclient` and `nbformat`, while a Python kernel needs `ipykernel`. For Python kernels, `nbedit` automatically prefers the interpreter recorded in the selected kernelspec as the driver when it has the required packages. `--driver-python` is only an override. Registered non-Python kernels use their kernelspec launch command while `nbedit` discovers a suitable Python driver independently.
 
@@ -393,6 +403,31 @@ nbedit kernels --details
 nbedit kernels --notebook analysis.ipynb --check
 nbedit kernels --json
 ```
+
+---
+
+### Session
+
+Manage persistent kernels used by `nbedit run --session`. A session is a small daemon that starts one kernel and keeps it (and its execution state) alive across separate `nbedit` invocations, until explicitly stopped.
+
+```sh
+nbedit session start [--name NAME] [--kernel ID] [--interpreter PATH] [--driver-python PATH] [--notebook PATH] [--cwd PATH] [--env KEY=VALUE] [--startup-timeout N] [--json]
+nbedit session list [--json]
+nbedit session stop <NAME> [--force]
+```
+
+```sh
+# Start a session and reuse it across two separate runs
+nbedit session start --name demo --interpreter .venv/bin/python
+nbedit run notebook.ipynb 1 --session demo   # e.g. cell 1: x = 1
+nbedit run notebook.ipynb 2 --session demo   # e.g. cell 2: print(x) -> 1
+
+# See what's running, then shut it down
+nbedit session list
+nbedit session stop demo
+```
+
+Sessions never expire on their own — `session list` detects and prunes dead entries from its registry, but a live kernel only stops via `session stop` (graceful shutdown, falling back to killing the process; `--force` skips straight to that). Session registry files live under an OS data directory (e.g. `~/.local/share/nbedit/sessions` on Linux), separate from the notebook and workspace.
 
 ---
 
@@ -454,8 +489,13 @@ Available tools:
 | `notebook_clear_outputs` | Clear code-cell outputs and counts |
 | `notebook_list_kernels` | Discover kernels and Python environments |
 | `notebook_run_cells` | Explicitly execute trusted cells and return outputs |
+| `notebook_session_start` | Start a persistent kernel session |
+| `notebook_session_list` | List sessions and whether their kernel is alive |
+| `notebook_session_stop` | Stop a session and shut down its kernel |
 
 Notebooks are also exposed as `notebook:///{path}` resources. Paths are canonicalized and restricted to `--root`; parent traversal and symlink escapes are rejected. Mutating tools create `.bak` files by default. The server never installs packages automatically. Kernel execution runs local notebook code with the permissions of the MCP server process and should only be enabled for trusted workspaces.
+
+`notebook_run_cells` is stateless by default — a fresh kernel per call. Pass `session` (a name returned by `notebook_session_start`) to run against a persistent kernel instead, so state carries over to later `notebook_run_cells` calls until `notebook_session_stop`. Treat an active session under the same trust bar as execution itself, since it accumulates arbitrary code and state across calls rather than resetting each time.
 
 ---
 
@@ -524,9 +564,11 @@ src/
   notebook.rs      -- nbformat model and atomic persistence
   selection.rs     -- Parsing and evaluation of cell selection expressions
   commands/
-    kernels.rs     -- Kernel/environment discovery and ranking
-    run.rs         -- Driver resolution and notebook execution
-    ...            -- Notebook reading and mutation commands
+    kernels.rs         -- Kernel/environment discovery and ranking
+    run.rs             -- Driver resolution and one-shot notebook execution
+    session.rs         -- `session` subcommand: registry, daemon start/stop
+    session_client.rs  -- Session registry format, daemon script, TCP protocol
+    ...                -- Notebook reading and mutation commands
   error.rs         -- Application errors and exit codes
 ```
 

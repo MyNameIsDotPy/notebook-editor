@@ -11,8 +11,10 @@ pub mod read;
 pub mod replace;
 pub mod run;
 pub mod search;
+pub mod session;
+pub mod session_client;
 
-use crate::cli::{Cli, Command};
+use crate::cli::{Cli, Command, SessionAction};
 use anyhow::Result;
 
 pub fn dispatch(cli: Cli) -> Result<()> {
@@ -121,6 +123,8 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             env,
             dry_run,
             json,
+            session,
+            create_session,
         } => run::run(
             &notebook,
             &selection,
@@ -140,6 +144,8 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             json,
             cli.backup,
             cli.quiet,
+            session.as_deref(),
+            create_session,
         ),
 
         Command::Replace {
@@ -189,5 +195,31 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             notebook.as_deref(),
             driver_python.as_deref(),
         ),
+
+        Command::Session { action } => match action {
+            SessionAction::Start {
+                name,
+                kernel,
+                interpreter,
+                driver_python,
+                notebook,
+                cwd,
+                env,
+                startup_timeout,
+                json,
+            } => session::start(
+                name.as_deref(),
+                kernel.as_deref(),
+                interpreter.as_deref(),
+                driver_python.as_deref(),
+                notebook.as_deref(),
+                cwd.as_deref(),
+                &env,
+                startup_timeout,
+                json,
+            ),
+            SessionAction::List { json } => session::list(json),
+            SessionAction::Stop { name, force } => session::stop(&name, force),
+        },
     }
 }

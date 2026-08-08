@@ -1,4 +1,4 @@
-use crate::commands::kernels;
+use crate::commands::{kernels, session, session_client};
 use crate::error::AppExit;
 use crate::notebook::Notebook;
 use crate::selection;
@@ -24,6 +24,8 @@ struct ExecutionReport {
     failed_cell: Option<usize>,
     duration_ms: u128,
     outputs_saved: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -46,6 +48,8 @@ pub fn run(
     json: bool,
     backup: bool,
     quiet: bool,
+    session: Option<&str>,
+    create_session: bool,
 ) -> Result<()> {
     if timeout < -1 {
         bail!("--timeout must be -1 or a non-negative number");
@@ -62,6 +66,44 @@ pub fn run(
     }
 
     let notebook_path = Path::new(notebook);
+
+    if let Some(session_name) = session {
+        if dry_run {
+            let report = serde_json::json!({
+                "status": "ready", "session": session_name,
+                "cells": code_indices.iter().map(|i| i + 1).collect::<Vec<_>>()
+            });
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("Session: {session_name}");
+                println!("Would execute {} code cell(s)", code_indices.len());
+            }
+            return Ok(());
+        }
+        return run_session(
+            &mut nb,
+            notebook,
+            notebook_path,
+            &code_indices,
+            session_name,
+            create_session,
+            kernel,
+            interpreter,
+            driver_python,
+            cwd,
+            environment,
+            startup_timeout,
+            allow_errors,
+            timeout,
+            record_timing,
+            overall_timeout,
+            json,
+            quiet,
+            backup,
+        );
+    }
+
     let candidate = kernels::resolve(&nb, notebook_path, kernel, interpreter, driver_python)?;
     if dry_run {
         let report = serde_json::json!({
@@ -115,7 +157,7 @@ pub fn run(
     let kernel_name = if candidate.kernelspec_name.is_some() {
         candidate.execution_label().to_owned()
     } else {
-        kernels::install_synthetic_spec(tmp_dir.path(), &candidate)?
+        kernels::install_synthetic_spec(tmp_dir.path(), "nbedit-env", &candidate)?
     };
     let script = build_script(
         tmp_nb
@@ -134,7 +176,7 @@ pub fn run(
     let driver = find_driver_python(driver_python, &candidate)?;
     let kernel_cwd = cwd
         .map(Path::new)
-        .unwrap_or_else(|| notebook_path.parent().unwrap_or_else(|| Path::new(".")));
+        .unwrap_or_else(|| kernels::parent_or_current(notebook_path));
     if !kernel_cwd.is_dir() {
         bail!(
             "Working directory '{}' does not exist",
@@ -233,6 +275,7 @@ pub fn run(
         failed_cell: failed_slot.and_then(|slot| execution_indices.get(slot).map(|i| i + 1)),
         duration_ms: started.elapsed().as_millis(),
         outputs_saved,
+        session: None,
     };
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -286,6 +329,142 @@ pub fn run(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn run_session(
+    nb: &mut Notebook,
+    notebook: &str,
+    notebook_path: &Path,
+    code_indices: &[usize],
+    session_name: &str,
+    create_session: bool,
+    kernel: Option<&str>,
+    interpreter: Option<&str>,
+    driver_python: Option<&str>,
+    cwd: Option<&str>,
+    environment: &[String],
+    startup_timeout: u64,
+    allow_errors: bool,
+    timeout: i64,
+    record_timing: bool,
+    overall_timeout: Option<u64>,
+    json: bool,
+    quiet: bool,
+    backup: bool,
+) -> Result<()> {
+    let record = session::ensure_for_run(
+        session_name,
+        create_session,
+        kernel,
+        interpreter,
+        driver_python,
+        notebook_path,
+        cwd,
+        environment,
+        startup_timeout,
+    )?;
+
+    if !quiet && !json {
+        eprintln!(
+            "Executing {} code cell(s) with session '{}' ({})...",
+            code_indices.len(),
+            record.name,
+            record.display_name
+        );
+    }
+
+    let cells: Vec<session_client::CellRequest> = code_indices
+        .iter()
+        .map(|&idx| session_client::CellRequest {
+            id: nb.cells[idx]
+                .id
+                .clone()
+                .expect("cell ids are ensured before session execution"),
+            source: nb.cells[idx].source_str(),
+        })
+        .collect();
+    let id_to_index: HashMap<String, usize> = code_indices
+        .iter()
+        .map(|&idx| (nb.cells[idx].id.clone().unwrap(), idx))
+        .collect();
+
+    let started = Instant::now();
+    let response = session_client::execute(
+        &record,
+        &cells,
+        allow_errors,
+        timeout,
+        record_timing,
+        overall_timeout,
+    )
+    .map_err(|error| {
+        AppExit::new(
+            1,
+            format!("Session '{}' execution failed: {error:#}", record.name),
+        )
+    })?;
+
+    let mut outputs_saved = false;
+    for result in &response.results {
+        if let Some(&nb_idx) = id_to_index.get(result.id.as_str()) {
+            nb.cells[nb_idx].outputs = result.outputs.clone();
+            nb.cells[nb_idx].execution_count = Some(result.execution_count.clone());
+            nb.cells[nb_idx].metadata = result.metadata.clone();
+        }
+    }
+    if !response.results.is_empty() {
+        nb.save(notebook, backup)?;
+        outputs_saved = true;
+    }
+
+    let failed_slot = response
+        .failed_id
+        .as_deref()
+        .and_then(|id| id_to_index.get(id).copied());
+    let report = ExecutionReport {
+        status: response.status.clone(),
+        kernel: record.kernel_label.clone(),
+        source: "Session".into(),
+        executed_cells: code_indices.iter().map(|i| i + 1).collect(),
+        failed_cell: failed_slot.map(|i| i + 1),
+        duration_ms: started.elapsed().as_millis(),
+        outputs_saved,
+        session: Some(record.name.clone()),
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else if outputs_saved && !quiet {
+        eprintln!("Outputs written to {notebook}");
+    }
+
+    match response.status.as_str() {
+        "ok" | "ok_with_errors" => Ok(()),
+        "cell_error" => Err(AppExit::new(
+            1,
+            "One or more cells raised an error (available outputs saved)",
+        )
+        .into()),
+        "cell_timeout" => {
+            Err(AppExit::new(1, "Cell execution timed out (available outputs saved)").into())
+        }
+        "kernel_error" => Err(AppExit::new(
+            1,
+            response
+                .message
+                .clone()
+                .unwrap_or_else(|| "Kernel execution failed".into()),
+        )
+        .into()),
+        other => Err(AppExit::new(
+            1,
+            response
+                .message
+                .clone()
+                .unwrap_or_else(|| format!("Session execution failed with status '{other}'")),
+        )
+        .into()),
+    }
+}
+
 fn wait_for_child(
     mut command: Command,
     timeout: Option<u64>,
@@ -314,7 +493,7 @@ fn wait_for_child(
     }
 }
 
-fn parse_environment(values: &[String]) -> Result<HashMap<String, String>> {
+pub(crate) fn parse_environment(values: &[String]) -> Result<HashMap<String, String>> {
     let mut result = HashMap::new();
     for item in values {
         let (key, value) = item
@@ -328,7 +507,10 @@ fn parse_environment(values: &[String]) -> Result<HashMap<String, String>> {
     Ok(result)
 }
 
-fn prepend_search_path(first: &Path, existing: Option<std::ffi::OsString>) -> std::ffi::OsString {
+pub(crate) fn prepend_search_path(
+    first: &Path,
+    existing: Option<std::ffi::OsString>,
+) -> std::ffi::OsString {
     let mut paths = vec![first.to_path_buf()];
     if let Some(existing) = existing {
         paths.extend(std::env::split_paths(&existing));
@@ -336,7 +518,7 @@ fn prepend_search_path(first: &Path, existing: Option<std::ffi::OsString>) -> st
     std::env::join_paths(paths).unwrap_or_else(|_| first.as_os_str().to_owned())
 }
 
-fn find_driver_python(
+pub(crate) fn find_driver_python(
     override_path: Option<&str>,
     candidate: &kernels::KernelCandidate,
 ) -> Result<String> {
