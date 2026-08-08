@@ -35,7 +35,7 @@ pub enum Command {
 
         /// Filter by cell type
         #[arg(long, value_enum)]
-        r#type: Option<CellTypeFilter>,
+        r#type: Option<CellType>,
 
         /// Also print cell outputs (code cells only)
         #[arg(long)]
@@ -57,7 +57,7 @@ pub enum Command {
 
         /// Cell type
         #[arg(long, value_enum, default_value = "code")]
-        r#type: CellTypeArg,
+        r#type: CellType,
 
         /// Insert before this index (1-based); omit to append
         #[arg(long)]
@@ -100,7 +100,7 @@ pub enum Command {
 
         /// Change the cell type
         #[arg(long, value_enum)]
-        r#type: Option<CellTypeArg>,
+        r#type: Option<CellType>,
 
         /// Only replace specific lines within the cell (same syntax as cell selection)
         #[arg(long, conflicts_with_all = ["insert_after", "insert_before", "delete_lines"])]
@@ -164,7 +164,7 @@ pub enum Command {
 
         /// Filter by cell type
         #[arg(long, value_enum)]
-        r#type: Option<CellTypeFilter>,
+        r#type: Option<CellType>,
 
         /// Print the full source of each matching cell (non-matching lines indented)
         #[arg(long)]
@@ -327,7 +327,7 @@ pub enum Command {
 
         /// Filter by cell type
         #[arg(long, value_enum)]
-        r#type: Option<CellTypeFilter>,
+        r#type: Option<CellType>,
 
         /// Case-insensitive matching
         #[arg(short = 'i', long)]
@@ -435,35 +435,18 @@ pub enum SessionAction {
 }
 
 #[derive(Clone, ValueEnum)]
-pub enum CellTypeFilter {
+pub enum CellType {
     Code,
     Markdown,
     Raw,
 }
 
-#[derive(Clone, ValueEnum)]
-pub enum CellTypeArg {
-    Code,
-    Markdown,
-    Raw,
-}
-
-impl CellTypeArg {
+impl CellType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            CellTypeArg::Code => "code",
-            CellTypeArg::Markdown => "markdown",
-            CellTypeArg::Raw => "raw",
-        }
-    }
-}
-
-impl CellTypeFilter {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            CellTypeFilter::Code => "code",
-            CellTypeFilter::Markdown => "markdown",
-            CellTypeFilter::Raw => "raw",
+            CellType::Code => "code",
+            CellType::Markdown => "markdown",
+            CellType::Raw => "raw",
         }
     }
 }
