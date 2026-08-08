@@ -26,6 +26,8 @@ driver requires `nbclient` and `nbformat`; a directly selected Python kernel req
 | `--env KEY=VALUE` | none | Kernel environment; repeatable |
 | `--dry-run` | off | Resolve without executing |
 | `--json` | off | Structured report |
+| `--session <NAME>` | none | Run against a persistent kernel session instead of a one-shot kernel |
+| `--create-session` | off | With `--session`, create it if it doesn't already exist |
 
 For Python, prefer the selected kernelspec interpreter as driver when it imports
 `nbclient` and `nbformat`, then probe PATH. Use `--driver-python` only to override.
@@ -34,6 +36,11 @@ outputs. Save available partial outputs after clean failures or interruption.
 
 Exit codes: `0` success, `1` execution failure, `2` missing driver dependencies, `124`
 overall timeout, `130` Ctrl-C.
+
+`--json` reports `status`, `kernel`, `source`, `executed_cells`, `failed_cell`,
+`duration_ms`, `outputs_saved`, and — only when `--session` was used —
+`session` with the session's name (present whether it was reused or created
+via `--create-session`).
 
 By default each `run` is stateless: a fresh kernel starts, executes, and shuts
 down within the call. Pass `--session <name>` to run against a persistent
