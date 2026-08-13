@@ -26,6 +26,8 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             show_outputs,
             json,
             lines,
+            full_output,
+            output_lines,
         } => read::run(
             &notebook,
             &selection,
@@ -33,6 +35,11 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             show_outputs,
             json,
             lines.as_deref(),
+            if full_output {
+                None
+            } else {
+                Some(output_lines.unwrap_or(crate::output_limit::DEFAULT_MAX_LINES))
+            },
         ),
 
         Command::Create {

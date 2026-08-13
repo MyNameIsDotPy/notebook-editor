@@ -48,6 +48,14 @@ pub enum Command {
         /// Only print specific lines within each cell (same syntax as cell selection)
         #[arg(long)]
         lines: Option<String>,
+
+        /// Show outputs in full, without truncating large streams or tracebacks
+        #[arg(long, conflicts_with = "output_lines")]
+        full_output: bool,
+
+        /// Max lines kept per output field before truncating (default: 100)
+        #[arg(long)]
+        output_lines: Option<usize>,
     },
 
     /// Create a new cell

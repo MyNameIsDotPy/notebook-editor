@@ -1,7 +1,10 @@
 use crate::notebook::Notebook;
+use crate::output_limit;
 use crate::selection;
 use anyhow::Result;
+use serde_json::Value;
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     notebook: &str,
     selection: &str,
@@ -9,6 +12,7 @@ pub fn run(
     show_outputs: bool,
     as_json: bool,
     lines_expr: Option<&str>,
+    max_output_lines: Option<usize>,
 ) -> Result<()> {
     let nb = Notebook::from_file(notebook)?;
     let indices = selection::resolve(selection, nb.len())?;
@@ -24,7 +28,12 @@ pub fn run(
         }
 
         if as_json {
-            println!("{}", serde_json::to_string_pretty(cell)?);
+            let mut value = serde_json::to_value(cell)?;
+            if let Some(outputs) = value.get("outputs").and_then(Value::as_array).cloned() {
+                value["outputs"] =
+                    Value::Array(output_limit::limit_outputs(&outputs, max_output_lines));
+            }
+            println!("{}", serde_json::to_string_pretty(&value)?);
             continue;
         }
 
@@ -51,7 +60,8 @@ pub fn run(
 
             if show_outputs && cell.cell_type == "code" && !cell.outputs.is_empty() {
                 println!("--- outputs ---");
-                for output in &cell.outputs {
+                let outputs = output_limit::limit_outputs(&cell.outputs, max_output_lines);
+                for output in &outputs {
                     print_output(output);
                 }
             }
@@ -94,6 +104,15 @@ fn print_output(output: &serde_json::Value) {
             let ename = output.get("ename").and_then(|v| v.as_str()).unwrap_or("");
             let evalue = output.get("evalue").and_then(|v| v.as_str()).unwrap_or("");
             println!("{ename}: {evalue}");
+            if let Some(traceback) = output.get("traceback") {
+                let s = multiline_value_to_string(traceback);
+                if !s.is_empty() {
+                    print!("{s}");
+                    if !s.ends_with('\n') {
+                        println!();
+                    }
+                }
+            }
         }
         _ => {
             println!("[output type: {output_type}]");

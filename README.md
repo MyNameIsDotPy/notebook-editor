@@ -65,6 +65,10 @@ Optional flags:
 | `--show-outputs` | Also print cell outputs (code cells only) |
 | `--json` | Emit the full cell JSON instead of plain source |
 | `--lines <EXPR>` | Print only specific lines within each cell (same selection syntax) |
+| `--output-lines <N>` | Max lines kept per output field before truncating (default: 100) |
+| `--full-output` | Show outputs in full, without truncating large streams or tracebacks |
+
+Large stream outputs and error tracebacks are truncated to 100 lines per field by default (applies to `--show-outputs` and `--json`), with a notice reporting the untruncated line/byte count. Raise the limit with `--output-lines` or disable it entirely with `--full-output`. Large binary outputs (images, PDFs, ...) above ~2KB are likewise replaced by a `{"nbedit_omitted": true, ...}` marker in `--json` mode unless `--full-output` is passed. This keeps a single runaway cell output from blowing an agent's context.
 
 **Reading specific lines of a cell**
 
@@ -498,6 +502,12 @@ Available tools:
 Notebooks are also exposed as `notebook:///{path}` resources. Paths are canonicalized and restricted to `--root`; parent traversal and symlink escapes are rejected. Mutating tools create `.bak` files by default. The server never installs packages automatically. Kernel execution runs local notebook code with the permissions of the MCP server process and should only be enabled for trusted workspaces.
 
 `notebook_run_cells` is stateless by default — a fresh kernel per call. Pass `session` (a name returned by `notebook_session_start`) to run against a persistent kernel instead, so state carries over to later `notebook_run_cells` calls until `notebook_session_stop`. Treat an active session under the same trust bar as execution itself, since it accumulates arbitrary code and state across calls rather than resetting each time.
+
+`notebook_read` and `notebook_run_cells` truncate large output fields (stream text, display data, error tracebacks) to 100 lines each by default, with a notice reporting the untruncated line/byte count — this keeps a single runaway cell output from blowing an agent's context. Pass `output_lines` to change the per-field limit, or `full_output: true` to disable truncation (and binary omission, below) entirely. `notebook_read` also accepts `include_source` (default `true`) to drop `source` from the response.
+
+`include_outputs` (both tools, default `true`) also accepts `"on_error"` instead of a boolean, to include outputs only for cells whose outputs contain an error — useful for a big notebook where only the failures matter. Large binary outputs (images, PDFs, ...) above ~2KB are replaced by default with `{"nbedit_omitted": true, "mime": ..., "bytes": ...}`, since raw base64 is pure noise as LLM context; `full_output: true` restores them.
+
+`notebook_run_cells` always returns a result — even when a cell raises an error, times out, or the kernel dies — instead of failing the tool call and discarding the outputs. Check the `status` field (`"ok"`, `"error"`, `"missing_dependency"`, `"overall_timeout"`, or `"interrupted"`) rather than assuming success; on failure, `message` explains what happened and `failed_cell` points at the first cell whose outputs contain an error, so the traceback is always one field away instead of requiring a follow-up `notebook_read` call.
 
 ---
 

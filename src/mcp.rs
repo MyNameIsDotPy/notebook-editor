@@ -1,5 +1,7 @@
 use crate::commands::{kernels, run, session};
+use crate::error::AppExit;
 use crate::notebook::{Cell, Notebook};
+use crate::output_limit;
 use crate::selection;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -144,9 +146,36 @@ impl McpServer {
             .and_then(Value::as_str)
             .unwrap_or("all");
         let indices = selection::resolve(expression, nb.len())?;
+        let max_lines = output_line_limit(args);
+        let include_source = args
+            .get("include_source")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let inclusion = output_inclusion(args);
         let cells: Vec<Value> = indices
             .into_iter()
-            .map(|index| json!({"index": index + 1, "cell": nb.cells[index]}))
+            .map(|index| {
+                let raw_outputs = &nb.cells[index].outputs;
+                let mut cell = serde_json::to_value(&nb.cells[index])
+                    .unwrap_or_else(|_| json!(nb.cells[index]));
+                if let Some(obj) = cell.as_object_mut() {
+                    if should_include_outputs(inclusion, raw_outputs) {
+                        if let Some(outputs) = obj.get("outputs").and_then(Value::as_array).cloned()
+                        {
+                            obj.insert(
+                                "outputs".into(),
+                                Value::Array(output_limit::limit_outputs(&outputs, max_lines)),
+                            );
+                        }
+                    } else {
+                        obj.remove("outputs");
+                    }
+                    if !include_source {
+                        obj.remove("source");
+                    }
+                }
+                json!({"index": index + 1, "cell": cell})
+            })
             .collect();
         Ok(json!({"path": relative_display(&self.root, &path), "cells": cells}))
     }
@@ -264,7 +293,10 @@ impl McpServer {
             .get("selection")
             .and_then(Value::as_str)
             .unwrap_or("all");
-        run::run(
+        // Captured rather than propagated with `?`: a cell raising an error is the
+        // single most common outcome an agent needs outputs for (the traceback),
+        // so this must not short-circuit before the cells below are built.
+        let run_result = run::run(
             path_str(&path)?,
             expression,
             args.get("timeout").and_then(Value::as_i64).unwrap_or(-1),
@@ -295,15 +327,43 @@ impl McpServer {
             args.get("create_session")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
-        )?;
+        );
         let nb = Notebook::from_file(path_str(&path)?)?;
         let indices = selection::resolve(expression, nb.len())?;
-        let cells: Vec<Value> = indices.into_iter().filter(|&i| nb.cells[i].cell_type == "code")
-            .map(|index| json!({"index": index + 1, "execution_count": nb.cells[index].execution_count, "outputs": nb.cells[index].outputs})).collect();
-        Ok(json!({
-            "status": "ok", "path": relative_display(&self.root, &path), "cells": cells,
+        let max_lines = output_line_limit(args);
+        let inclusion = output_inclusion(args);
+        let mut failed_cell = None;
+        let cells: Vec<Value> = indices
+            .into_iter()
+            .filter(|&i| nb.cells[i].cell_type == "code")
+            .map(|index| {
+                let outputs = &nb.cells[index].outputs;
+                if failed_cell.is_none() && output_limit::has_error(outputs) {
+                    failed_cell = Some(index + 1);
+                }
+                let mut entry = json!({
+                    "index": index + 1,
+                    "execution_count": nb.cells[index].execution_count,
+                });
+                if should_include_outputs(inclusion, outputs) {
+                    entry["outputs"] =
+                        Value::Array(output_limit::limit_outputs(outputs, max_lines));
+                }
+                entry
+            })
+            .collect();
+        let (status, message) = run_status(&run_result);
+        let mut result = json!({
+            "status": status, "path": relative_display(&self.root, &path), "cells": cells,
             "session": args.get("session").and_then(Value::as_str),
-        }))
+        });
+        if let Some(index) = failed_cell {
+            result["failed_cell"] = json!(index);
+        }
+        if let Some(message) = message {
+            result["message"] = json!(message);
+        }
+        Ok(result)
     }
 
     fn notebook_session_start(&self, args: &Value) -> Result<Value> {
@@ -406,7 +466,13 @@ fn tool_definitions() -> Vec<Value> {
             "Read selected notebook cells as structured JSON",
             schema(
                 &["path"],
-                json!({"path": string_prop("Workspace-relative .ipynb path"), "selection": string_prop("Cell selection; default all")}),
+                json!({
+                    "path": string_prop("Workspace-relative .ipynb path"), "selection": string_prop("Cell selection; default all"),
+                    "include_source": bool_prop("Include each cell's source; default true"),
+                    "include_outputs": output_inclusion_prop("Include each code cell's outputs: true (default), false, or \"on_error\" to include only for cells whose outputs contain an error"),
+                    "output_lines": integer_prop("Max lines kept per output field before truncating; default 100"),
+                    "full_output": bool_prop("Return outputs in full, without truncation or binary omission")
+                }),
             ),
         ),
         tool(
@@ -451,7 +517,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "notebook_run_cells",
-            "Execute trusted notebook code through a Jupyter kernel and save outputs",
+            "Execute trusted notebook code through a Jupyter kernel and save outputs. Always returns 'status' ('ok', 'error', 'missing_dependency', 'overall_timeout', or 'interrupted') plus, on failure, 'message' and 'failed_cell' — outputs (including tracebacks) are returned regardless of status, so check 'failed_cell'/'status' rather than assuming a cell succeeded just because the call didn't throw",
             mutation_schema(
                 &["path"],
                 json!({
@@ -461,7 +527,10 @@ fn tool_definitions() -> Vec<Value> {
                     "overall_timeout": integer_prop("Overall execution seconds"), "allow_errors": bool_prop("Continue after cell errors"),
                     "include_prior": bool_prop("Execute prior code cells as context"),
                     "session": string_prop("Run against a persistent kernel session (see notebook_session_start) instead of a one-shot kernel"),
-                    "create_session": bool_prop("Create the session if it doesn't exist yet; only meaningful together with session")
+                    "create_session": bool_prop("Create the session if it doesn't exist yet; only meaningful together with session"),
+                    "include_outputs": output_inclusion_prop("Include each executed cell's outputs in the result: true (default), false, or \"on_error\" to include only for cells whose outputs contain an error"),
+                    "output_lines": integer_prop("Max lines kept per output field before truncating; default 100"),
+                    "full_output": bool_prop("Return outputs in full, without truncation or binary omission")
                 }),
             ),
         ),
@@ -517,6 +586,12 @@ fn integer_prop(description: &str) -> Value {
 fn bool_prop(description: &str) -> Value {
     json!({"type": "boolean", "description": description})
 }
+fn output_inclusion_prop(description: &str) -> Value {
+    json!({
+        "description": description,
+        "anyOf": [{"type": "boolean"}, {"type": "string", "enum": ["on_error"]}]
+    })
+}
 fn enum_prop(values: &[&str]) -> Value {
     json!({"type": "string", "enum": values})
 }
@@ -546,6 +621,65 @@ fn optional_usize(value: &Value, key: &str) -> Result<Option<usize>> {
 fn backup(args: &Value) -> bool {
     args.get("backup").and_then(Value::as_bool).unwrap_or(true)
 }
+fn output_line_limit(args: &Value) -> Option<usize> {
+    if args
+        .get("full_output")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    Some(
+        args.get("output_lines")
+            .and_then(Value::as_u64)
+            .map(|n| n as usize)
+            .unwrap_or(output_limit::DEFAULT_MAX_LINES),
+    )
+}
+
+#[derive(Clone, Copy)]
+enum OutputInclusion {
+    All,
+    None,
+    OnError,
+}
+
+/// `include_outputs` accepts `true`/`false` (default `true`) or the string
+/// `"on_error"` to only include outputs for cells that raised an error.
+fn output_inclusion(args: &Value) -> OutputInclusion {
+    match args.get("include_outputs") {
+        Some(Value::Bool(false)) => OutputInclusion::None,
+        Some(Value::String(s)) if s == "on_error" => OutputInclusion::OnError,
+        _ => OutputInclusion::All,
+    }
+}
+
+fn should_include_outputs(inclusion: OutputInclusion, outputs: &[Value]) -> bool {
+    match inclusion {
+        OutputInclusion::All => true,
+        OutputInclusion::None => false,
+        OutputInclusion::OnError => output_limit::has_error(outputs),
+    }
+}
+
+/// Maps a `run::run` result to a status label and, on failure, a message —
+/// without discarding it, so the caller can still report cell outputs
+/// (notably tracebacks) alongside a non-"ok" status instead of losing them.
+fn run_status(result: &Result<()>) -> (&'static str, Option<String>) {
+    match result {
+        Ok(()) => ("ok", None),
+        Err(error) => {
+            let label = match error.downcast_ref::<AppExit>().map(|e| e.code) {
+                Some(2) => "missing_dependency",
+                Some(124) => "overall_timeout",
+                Some(130) => "interrupted",
+                _ => "error",
+            };
+            (label, Some(format!("{error:#}")))
+        }
+    }
+}
+
 fn path_str(path: &Path) -> Result<&str> {
     path.to_str()
         .context("Notebook path contains non-UTF-8 characters")
@@ -721,5 +855,69 @@ mod tests {
     fn resource_uri_roundtrips_spaces_and_unicode() {
         let path = "reports/my café.ipynb";
         assert_eq!(parse_notebook_uri(&notebook_uri(path)).unwrap(), path);
+    }
+
+    fn write_notebook_with_outputs(dir: &Path) {
+        std::fs::write(dir.join("out.ipynb"), serde_json::to_vec(&json!({
+            "nbformat": 4, "nbformat_minor": 5, "metadata": {},
+            "cells": [
+                {"id": "ok", "cell_type": "code", "metadata": {}, "source": ["1+1"], "execution_count": 1,
+                 "outputs": [{"output_type": "execute_result", "execution_count": 1, "data": {"text/plain": "2"}}]},
+                {"id": "bad", "cell_type": "code", "metadata": {}, "source": ["1/0"], "execution_count": 2,
+                 "outputs": [{"output_type": "error", "ename": "ZeroDivisionError", "evalue": "division by zero", "traceback": ["Traceback...\n"]}]}
+            ]
+        })).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn notebook_read_include_source_false_omits_source() {
+        let (dir, server) = server();
+        write_notebook(dir.path());
+        let read = server
+            .notebook_read(&json!({"path": "test.ipynb", "include_source": false}))
+            .unwrap();
+        assert!(read["cells"][0]["cell"].get("source").is_none());
+    }
+
+    #[test]
+    fn notebook_read_on_error_only_includes_failing_cell_outputs() {
+        let (dir, server) = server();
+        write_notebook_with_outputs(dir.path());
+        let read = server
+            .notebook_read(&json!({"path": "out.ipynb", "include_outputs": "on_error"}))
+            .unwrap();
+        let cells = read["cells"].as_array().unwrap();
+        assert!(cells[0]["cell"].get("outputs").is_none());
+        assert_eq!(cells[1]["cell"]["outputs"][0]["output_type"], "error");
+    }
+
+    #[test]
+    fn run_status_maps_app_exit_codes_without_losing_the_message() {
+        assert_eq!(run_status(&Ok(())).0, "ok");
+
+        let missing: Result<()> = Err(AppExit::new(2, "no nbclient").into());
+        assert_eq!(run_status(&missing).0, "missing_dependency");
+
+        let timeout: Result<()> = Err(AppExit::new(124, "timed out").into());
+        assert_eq!(run_status(&timeout).0, "overall_timeout");
+
+        let interrupted: Result<()> = Err(AppExit::new(130, "ctrl-c").into());
+        assert_eq!(run_status(&interrupted).0, "interrupted");
+
+        let cell_error: Result<()> = Err(AppExit::new(1, "cell failed").into());
+        let (label, message) = run_status(&cell_error);
+        assert_eq!(label, "error");
+        assert_eq!(message.unwrap(), "cell failed");
+    }
+
+    #[test]
+    fn should_include_outputs_respects_inclusion_mode() {
+        let clean: Vec<Value> = vec![json!({"output_type": "stream", "text": "ok\n"})];
+        let failing: Vec<Value> =
+            vec![json!({"output_type": "error", "ename": "E", "evalue": "x", "traceback": []})];
+        assert!(should_include_outputs(OutputInclusion::All, &clean));
+        assert!(!should_include_outputs(OutputInclusion::None, &failing));
+        assert!(!should_include_outputs(OutputInclusion::OnError, &clean));
+        assert!(should_include_outputs(OutputInclusion::OnError, &failing));
     }
 }
