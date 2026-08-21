@@ -116,7 +116,12 @@ fn print_output(output: &serde_json::Value, max_chars: Option<usize>) {
             println!("{}", truncate(&format!("{ename}: {evalue}"), max_chars));
             if let Some(traceback) = output.get("traceback") {
                 let s = truncate(&multiline_value_to_string(traceback), max_chars);
-                if !s.is_empty() { print!("{s}"); if !s.ends_with('\n') { println!(); } }
+                if !s.is_empty() {
+                    print!("{s}");
+                    if !s.ends_with('\n') {
+                        println!();
+                    }
+                }
             }
         }
         _ => {

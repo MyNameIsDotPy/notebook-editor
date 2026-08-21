@@ -164,10 +164,8 @@ impl McpServer {
             .unwrap_or("all");
         let indices = selection::resolve(expression, nb.len())?;
         let cell_type = optional_str(args, "cell_type")?;
-        let include_outputs = args
-            .get("include_outputs")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let inclusion = output_inclusion(args);
+        let max_lines = output_line_limit(args);
         let include_source = args
             .get("include_source")
             .and_then(Value::as_bool)
@@ -189,8 +187,15 @@ impl McpServer {
                         }
                     } else { json!(cell.source_str()) }
                 } else { Value::Null };
-                let outputs = if include_outputs { truncate_outputs(&cell.outputs, max_output_chars) } else { Value::Null };
-                Ok(json!({"index": index + 1, "cell": cell, "id": cell.id, "cell_type": cell.cell_type, "source": source, "outputs": outputs, "execution_count": if include_outputs { cell.execution_count.clone() } else { None }}))
+                let include_outputs = should_include_outputs(inclusion, &cell.outputs);
+                let outputs = if include_outputs {
+                    truncate_outputs(&output_limit::limit_outputs(&cell.outputs, max_lines), max_output_chars)
+                } else { Value::Null };
+                let mut compatibility_cell = serde_json::to_value(cell)?;
+                let compatibility = compatibility_cell.as_object_mut().expect("cell serializes as object");
+                if !include_source { compatibility.remove("source"); }
+                if !include_outputs { compatibility.remove("outputs"); compatibility.remove("execution_count"); }
+                Ok(json!({"index": index + 1, "cell": compatibility_cell, "id": cell.id, "cell_type": cell.cell_type, "source": source, "outputs": outputs, "execution_count": if include_outputs { cell.execution_count.clone() } else { None }}))
             })
              .collect::<Result<Vec<_>>>()?;
         Ok(json!({"path": relative_display(&self.root, &path), "cells": cells}))
