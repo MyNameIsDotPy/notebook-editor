@@ -98,6 +98,7 @@ pub fn run(
             timeout,
             record_timing,
             overall_timeout,
+            iopub_timeout,
             json,
             quiet,
             backup,
@@ -347,6 +348,7 @@ fn run_session(
     timeout: i64,
     record_timing: bool,
     overall_timeout: Option<u64>,
+    iopub_timeout: u64,
     json: bool,
     quiet: bool,
     backup: bool,
@@ -375,16 +377,17 @@ fn run_session(
     let cells: Vec<session_client::CellRequest> = code_indices
         .iter()
         .map(|&idx| session_client::CellRequest {
-            id: nb.cells[idx]
-                .id
-                .clone()
-                .expect("cell ids are ensured before session execution"),
+            // Request IDs must be unique even for invalid notebooks that carry
+            // duplicate nbformat cell IDs.
+            id: format!("nbedit-session-{idx}"),
             source: nb.cells[idx].source_str(),
+            metadata: nb.cells[idx].metadata.clone(),
         })
         .collect();
-    let id_to_index: HashMap<String, usize> = code_indices
+    let id_to_index: HashMap<String, usize> = cells
         .iter()
-        .map(|&idx| (nb.cells[idx].id.clone().unwrap(), idx))
+        .zip(code_indices)
+        .map(|(cell, &idx)| (cell.id.clone(), idx))
         .collect();
 
     let started = Instant::now();
@@ -395,10 +398,19 @@ fn run_session(
         timeout,
         record_timing,
         overall_timeout,
+        iopub_timeout,
     )
     .map_err(|error| {
+        let code = if error
+            .downcast_ref::<session_client::OverallTimeout>()
+            .is_some()
+        {
+            124
+        } else {
+            1
+        };
         AppExit::new(
-            1,
+            code,
             format!("Session '{}' execution failed: {error:#}", record.name),
         )
     })?;

@@ -55,6 +55,7 @@ mod tests {
             nbformat_minor: 5,
             metadata: Value::Object(Default::default()),
             cells,
+            extra: Default::default(),
         }
     }
 

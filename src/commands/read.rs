@@ -10,6 +10,8 @@ pub fn run(
     selection: &str,
     type_filter: Option<&str>,
     show_outputs: bool,
+    only_outputs: bool,
+    max_output_chars: Option<usize>,
     as_json: bool,
     lines_expr: Option<&str>,
     max_output_lines: Option<usize>,
@@ -42,7 +44,15 @@ pub fn run(
 
         println!("[Cell {cell_num} | {}]", cell.cell_type);
 
-        if let Some(expr) = lines_expr {
+        if only_outputs {
+            if cell.cell_type == "code" && !cell.outputs.is_empty() {
+                for output in &cell.outputs {
+                    print_output(output, max_output_chars);
+                }
+            } else {
+                println!("<no outputs>");
+            }
+        } else if let Some(expr) = lines_expr {
             // Print only the requested lines (1-based selection over the cell's lines)
             if all_lines.is_empty() {
                 println!("<empty cell>");
@@ -62,7 +72,7 @@ pub fn run(
                 println!("--- outputs ---");
                 let outputs = output_limit::limit_outputs(&cell.outputs, max_output_lines);
                 for output in &outputs {
-                    print_output(output);
+                    print_output(output, max_output_chars);
                 }
             }
         }
@@ -73,7 +83,7 @@ pub fn run(
     Ok(())
 }
 
-fn print_output(output: &serde_json::Value) {
+fn print_output(output: &serde_json::Value, max_chars: Option<usize>) {
     let output_type = output
         .get("output_type")
         .and_then(|v| v.as_str())
@@ -84,7 +94,7 @@ fn print_output(output: &serde_json::Value) {
                 .get("text")
                 .map(multiline_value_to_string)
                 .unwrap_or_default();
-            print!("{text}");
+            print!("{}", truncate(&text, max_chars));
             if !text.ends_with('\n') {
                 println!();
             }
@@ -93,7 +103,7 @@ fn print_output(output: &serde_json::Value) {
             if let Some(data) = output.get("data") {
                 if let Some(text) = data.get("text/plain") {
                     let s = multiline_value_to_string(text);
-                    print!("{s}");
+                    print!("{}", truncate(&s, max_chars));
                     if !s.ends_with('\n') {
                         println!();
                     }
@@ -103,20 +113,28 @@ fn print_output(output: &serde_json::Value) {
         "error" => {
             let ename = output.get("ename").and_then(|v| v.as_str()).unwrap_or("");
             let evalue = output.get("evalue").and_then(|v| v.as_str()).unwrap_or("");
-            println!("{ename}: {evalue}");
+            println!("{}", truncate(&format!("{ename}: {evalue}"), max_chars));
             if let Some(traceback) = output.get("traceback") {
-                let s = multiline_value_to_string(traceback);
-                if !s.is_empty() {
-                    print!("{s}");
-                    if !s.ends_with('\n') {
-                        println!();
-                    }
-                }
+                let s = truncate(&multiline_value_to_string(traceback), max_chars);
+                if !s.is_empty() { print!("{s}"); if !s.ends_with('\n') { println!(); } }
             }
         }
         _ => {
             println!("[output type: {output_type}]");
         }
+    }
+}
+
+fn truncate(value: &str, max_chars: Option<usize>) -> String {
+    let Some(limit) = max_chars else {
+        return value.to_owned();
+    };
+    let mut chars = value.chars();
+    let text: String = chars.by_ref().take(limit).collect();
+    if chars.next().is_some() {
+        format!("{text}\n... output truncated ...\n")
+    } else {
+        text
     }
 }
 

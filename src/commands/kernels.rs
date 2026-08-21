@@ -393,22 +393,23 @@ fn python_candidate(
     if !path.is_file() {
         return None;
     }
-    let canonical = std::fs::canonicalize(&path).unwrap_or(path);
-    let name = canonical
+    // Virtualenv interpreters are commonly symlinks to a base Python. Keep the
+    // supplied path so invoking it retains the virtualenv's site-packages.
+    let name = path
         .parent()
         .and_then(Path::file_name)
         .and_then(|s| s.to_str())
         .unwrap_or("python");
-    let usable = !validate || python_has_ipykernel(&canonical);
+    let usable = !validate || python_has_ipykernel(&path);
     Some(KernelCandidate {
-        id: format!("python:{}", canonical.to_string_lossy()),
+        id: format!("python:{}", path.to_string_lossy()),
         display_name: format!("Python ({name})"),
         language: Some("python".into()),
         source,
         kernelspec_name: None,
-        interpreter: Some(canonical.clone()),
+        interpreter: Some(path.clone()),
         argv: vec![
-            canonical.to_string_lossy().into(),
+            path.to_string_lossy().into(),
             "-m".into(),
             "ipykernel_launcher".into(),
             "-f".into(),
@@ -595,6 +596,19 @@ mod tests {
         std::fs::create_dir_all(unix.parent().unwrap()).unwrap();
         std::fs::write(&unix, "").unwrap();
         assert_eq!(python_in_prefix(temp.path()), Some(unix));
+    }
+
+    #[test]
+    fn python_candidate_preserves_supplied_interpreter_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let interpreter = dir.path().join("python");
+        std::fs::write(&interpreter, "").unwrap();
+        let candidate =
+            python_candidate(interpreter.clone(), KernelSource::Explicit, false).unwrap();
+        assert_eq!(
+            candidate.interpreter.as_deref(),
+            Some(interpreter.as_path())
+        );
     }
 
     #[test]

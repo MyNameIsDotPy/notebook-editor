@@ -105,6 +105,15 @@ impl McpServer {
             "notebook_read" => self.notebook_read(&arguments),
             "notebook_create_cell" => self.notebook_create_cell(&arguments),
             "notebook_edit_cell" => self.notebook_edit_cell(&arguments),
+            "notebook_search" => self.notebook_search(&arguments),
+            "notebook_export_cell" => self.notebook_export_cell(&arguments),
+            "notebook_duplicate_cells" => self.notebook_duplicate_cells(&arguments),
+            "notebook_strip" => self.notebook_strip(&arguments),
+            "notebook_validate" => self.notebook_validate(&arguments),
+            "notebook_list_cell_ids" => self.notebook_list_cell_ids(&arguments),
+            "notebook_find_cell_references" => self.notebook_find_cell_references(&arguments),
+            "notebook_render" => self.notebook_render(&arguments),
+            "notebook_query" => self.notebook_query(&arguments),
             "notebook_delete_cells" => self.notebook_delete_cells(&arguments),
             "notebook_clear_outputs" => self.notebook_clear_outputs(&arguments),
             "notebook_list_kernels" => self.notebook_list_kernels(&arguments),
@@ -146,57 +155,48 @@ impl McpServer {
             .and_then(Value::as_str)
             .unwrap_or("all");
         let indices = selection::resolve(expression, nb.len())?;
-        let max_lines = output_line_limit(args);
+        let cell_type = optional_str(args, "cell_type")?;
+        let include_outputs = args
+            .get("include_outputs")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let include_source = args
             .get("include_source")
             .and_then(Value::as_bool)
             .unwrap_or(true);
-        let inclusion = output_inclusion(args);
+        let lines = optional_str(args, "lines")?;
+        let max_output_chars = optional_usize(args, "max_output_chars")?;
         let cells: Vec<Value> = indices
             .into_iter()
+            .filter(|&index| cell_type.is_none_or(|kind| nb.cells[index].cell_type == kind))
             .map(|index| {
-                let raw_outputs = &nb.cells[index].outputs;
-                let mut cell = serde_json::to_value(&nb.cells[index])
-                    .unwrap_or_else(|_| json!(nb.cells[index]));
-                if let Some(obj) = cell.as_object_mut() {
-                    if should_include_outputs(inclusion, raw_outputs) {
-                        if let Some(outputs) = obj.get("outputs").and_then(Value::as_array).cloned()
-                        {
-                            obj.insert(
-                                "outputs".into(),
-                                Value::Array(output_limit::limit_outputs(&outputs, max_lines)),
-                            );
+                let cell = &nb.cells[index];
+                let source = if include_source {
+                    if let Some(expression) = lines {
+                        let source = cell.source_str();
+                        let all_lines: Vec<&str> = source.lines().collect();
+                        if all_lines.is_empty() { json!([]) } else {
+                            let selected = selection::resolve(expression, all_lines.len())?;
+                            json!(selected.into_iter().map(|line| json!({"line": line + 1, "text": all_lines[line]})).collect::<Vec<_>>())
                         }
-                    } else {
-                        obj.remove("outputs");
-                    }
-                    if !include_source {
-                        obj.remove("source");
-                    }
-                }
-                json!({"index": index + 1, "cell": cell})
+                    } else { json!(cell.source_str()) }
+                } else { Value::Null };
+                let outputs = if include_outputs { truncate_outputs(&cell.outputs, max_output_chars) } else { Value::Null };
+                Ok(json!({"index": index + 1, "cell": cell, "id": cell.id, "cell_type": cell.cell_type, "source": source, "outputs": outputs, "execution_count": if include_outputs { cell.execution_count.clone() } else { None }}))
             })
-            .collect();
+             .collect::<Result<Vec<_>>>()?;
         Ok(json!({"path": relative_display(&self.root, &path), "cells": cells}))
     }
 
     fn notebook_create_cell(&self, args: &Value) -> Result<Value> {
         let path = self.notebook_path(args)?;
         let mut nb = Notebook::from_file(path_str(&path)?)?;
-        let cell_type = args
-            .get("cell_type")
-            .and_then(Value::as_str)
-            .unwrap_or("code");
+        let cell_type = optional_str(args, "cell_type")?.unwrap_or("code");
         if !matches!(cell_type, "code" | "markdown" | "raw") {
             bail!("cell_type must be code, markdown, or raw");
         }
         let mut cell = Cell::new(cell_type);
-        cell.set_source(
-            args.get("source")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_owned(),
-        );
+        cell.set_source(source_from_args(args, &self.root)?.unwrap_or_default());
         let at = optional_usize(args, "at")?.unwrap_or(nb.len() + 1);
         if at == 0 || at > nb.len() + 1 {
             bail!("at is outside the valid range 1..={}", nb.len() + 1);
@@ -211,16 +211,52 @@ impl McpServer {
 
     fn notebook_edit_cell(&self, args: &Value) -> Result<Value> {
         let path = self.notebook_path(args)?;
+        let line_modes = ["lines", "insert_after", "insert_before", "delete_lines"];
+        let selected_modes = line_modes
+            .iter()
+            .filter(|key| args.get(**key).is_some())
+            .count();
+        if selected_modes > 1 {
+            bail!("Only one of lines, insert_after, insert_before, or delete_lines may be used");
+        }
+        if selected_modes > 0 {
+            let source = source_from_args(args, &self.root)?;
+            if args.get("delete_lines").is_none() && source.is_none() {
+                bail!("Line replacement and insertion require source or source_path");
+            }
+            crate::commands::edit::run(
+                path_str(&path)?,
+                required_usize(args, "index")?,
+                source,
+                None,
+                false,
+                optional_str(args, "cell_type")?,
+                optional_str(args, "lines")?,
+                optional_usize(args, "insert_after")?,
+                optional_usize(args, "insert_before")?,
+                optional_str(args, "delete_lines")?,
+                backup(args),
+                true,
+            )?;
+            return Ok(
+                json!({"path": relative_display(&self.root, &path), "updated_cell": required_usize(args, "index")?}),
+            );
+        }
         let mut nb = Notebook::from_file(path_str(&path)?)?;
         let index = required_usize(args, "index")?;
         if index == 0 || index > nb.len() {
             bail!("Cell {index} is outside the valid range 1..={}", nb.len());
         }
-        let cell = &mut nb.cells[index - 1];
-        if let Some(source) = args.get("source").and_then(Value::as_str) {
-            cell.set_source(source.to_owned());
+        let source = source_from_args(args, &self.root)?;
+        let cell_type = optional_str(args, "cell_type")?;
+        if source.is_none() && cell_type.is_none() {
+            bail!("Provide source, source_path, or cell_type");
         }
-        if let Some(cell_type) = args.get("cell_type").and_then(Value::as_str) {
+        let cell = &mut nb.cells[index - 1];
+        if let Some(source) = source {
+            cell.set_source(source);
+        }
+        if let Some(cell_type) = cell_type {
             if !matches!(cell_type, "code" | "markdown" | "raw") {
                 bail!("cell_type must be code, markdown, or raw");
             }
@@ -233,6 +269,206 @@ impl McpServer {
         nb.ensure_cell_ids();
         nb.save(path_str(&path)?, backup(args))?;
         Ok(json!({"path": relative_display(&self.root, &path), "updated_cell": index}))
+    }
+
+    fn notebook_search(&self, args: &Value) -> Result<Value> {
+        let path = self.notebook_path(args)?;
+        let pattern = required_str(args, "pattern")?;
+        let pattern = if args
+            .get("ignore_case")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            format!("(?i){pattern}")
+        } else {
+            pattern.to_owned()
+        };
+        let re = regex::Regex::new(&pattern).with_context(|| "Invalid regex pattern")?;
+        let cell_type = optional_str(args, "cell_type")?;
+        let nb = Notebook::from_file(path_str(&path)?)?;
+        let matches: Vec<Value> = nb
+            .cells
+            .iter()
+            .enumerate()
+            .filter(|(_, cell)| cell_type.is_none_or(|kind| cell.cell_type == kind))
+            .filter_map(|(index, cell)| {
+                let lines: Vec<Value> = cell
+                    .source_str()
+                    .lines()
+                    .enumerate()
+                    .filter(|(_, line)| re.is_match(line))
+                    .map(|(line, text)| json!({"line": line + 1, "text": text}))
+                    .collect();
+                (!lines.is_empty()).then(
+                    || json!({"index": index + 1, "cell_type": cell.cell_type, "lines": lines}),
+                )
+            })
+            .collect();
+        Ok(
+            json!({"path": relative_display(&self.root, &path), "matches": matches, "match_count": matches.iter().map(|value| value["lines"].as_array().map_or(0, Vec::len)).sum::<usize>()}),
+        )
+    }
+
+    fn notebook_export_cell(&self, args: &Value) -> Result<Value> {
+        let path = self.notebook_path(args)?;
+        let nb = Notebook::from_file(path_str(&path)?)?;
+        let index = required_usize(args, "index")?;
+        if index == 0 || index > nb.len() {
+            bail!("Cell {index} is outside the valid range 1..={}", nb.len());
+        }
+        let output = resolve_workspace_output_file(&self.root, required_str(args, "file_path")?)?;
+        let output_str = path_str(&output)?;
+        crate::commands::export::write_source(
+            output_str,
+            &nb.cells[index - 1].source_str(),
+            args.get("overwrite")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        )?;
+        Ok(json!({
+            "path": relative_display(&self.root, &path), "exported_cell": index,
+            "file_path": relative_display(&self.root, &output),
+        }))
+    }
+
+    fn notebook_duplicate_cells(&self, args: &Value) -> Result<Value> {
+        let path = self.notebook_path(args)?;
+        let selection = required_str(args, "selection")?;
+        crate::commands::duplicate::run(
+            path_str(&path)?,
+            selection,
+            optional_usize(args, "at")?,
+            backup(args),
+            true,
+        )?;
+        Ok(json!({"path": relative_display(&self.root, &path), "status": "ok"}))
+    }
+
+    fn notebook_strip(&self, args: &Value) -> Result<Value> {
+        let path = self.notebook_path(args)?;
+        crate::commands::strip::run(
+            path_str(&path)?,
+            optional_str(args, "selection")?.unwrap_or("all"),
+            args.get("outputs")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            args.get("cell_metadata")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            args.get("notebook_metadata")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            args.get("dry_run")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            backup(args),
+            true,
+        )?;
+        Ok(json!({"path": relative_display(&self.root, &path), "status": "ok"}))
+    }
+
+    fn notebook_validate(&self, args: &Value) -> Result<Value> {
+        let path = self.notebook_path(args)?;
+        let nb = Notebook::from_file(path_str(&path)?)?;
+        let mut ids = std::collections::HashSet::new();
+        let mut issues = Vec::new();
+        for (index, cell) in nb.cells.iter().enumerate() {
+            if !matches!(cell.cell_type.as_str(), "code" | "markdown" | "raw") {
+                issues.push(format!("Cell {} has unsupported type", index + 1));
+            }
+            match &cell.id {
+                Some(id) if !ids.insert(id) => {
+                    issues.push(format!("Cell {} duplicates an ID", index + 1))
+                }
+                Some(_) => {}
+                None => issues.push(format!("Cell {} has no ID", index + 1)),
+            }
+        }
+        Ok(
+            json!({"path": relative_display(&self.root, &path), "valid": issues.is_empty(), "issues": issues}),
+        )
+    }
+
+    fn notebook_list_cell_ids(&self, args: &Value) -> Result<Value> {
+        let path = self.notebook_path(args)?;
+        let nb = Notebook::from_file(path_str(&path)?)?;
+        Ok(
+            json!({"path": relative_display(&self.root, &path), "cells": nb.cells.iter().enumerate().map(|(i, c)| json!({"index": i + 1, "type": c.cell_type, "id": c.id})).collect::<Vec<_>>() }),
+        )
+    }
+
+    fn notebook_find_cell_references(&self, args: &Value) -> Result<Value> {
+        let path = self.notebook_path(args)?;
+        let id = required_str(args, "cell_id")?;
+        let nb = Notebook::from_file(path_str(&path)?)?;
+        if !nb.cells.iter().any(|cell| cell.id.as_deref() == Some(id)) {
+            bail!("No cell has ID '{id}'");
+        }
+        let matches: Vec<_> = nb
+            .cells
+            .iter()
+            .enumerate()
+            .filter(|(_, cell)| cell.id.as_deref() != Some(id))
+            .filter(|(_, cell)| cell.source_str().contains(id))
+            .map(|(i, cell)| json!({"index": i + 1, "scope": "source", "cell_id": cell.id}))
+            .collect();
+        Ok(json!({"path": relative_display(&self.root, &path), "matches": matches}))
+    }
+
+    fn notebook_render(&self, args: &Value) -> Result<Value> {
+        let path = self.notebook_path(args)?;
+        let output = resolve_workspace_output_file(&self.root, required_str(args, "output_path")?)?;
+        crate::commands::render::run(
+            path_str(&path)?,
+            path_str(&output)?,
+            args.get("overwrite")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            optional_str(args, "driver_python")?,
+        )?;
+        Ok(
+            json!({"path": relative_display(&self.root, &path), "output_path": relative_display(&self.root, &output)}),
+        )
+    }
+
+    fn notebook_query(&self, args: &Value) -> Result<Value> {
+        let path = self.notebook_path(args)?;
+        let pattern = required_str(args, "pattern")?;
+        let scope = required_str(args, "scope")?;
+        let pattern = if args
+            .get("ignore_case")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            format!("(?i){pattern}")
+        } else {
+            pattern.to_owned()
+        };
+        let re = regex::Regex::new(&pattern)?;
+        let nb = Notebook::from_file(path_str(&path)?)?;
+        let mut matches = Vec::new();
+        if scope == "notebook-metadata" {
+            let value = serde_json::to_string(&nb.metadata)?;
+            if re.is_match(&value) {
+                matches.push(json!({"scope":scope,"value":value}));
+            }
+        } else if matches!(scope, "outputs" | "cell-metadata") {
+            for (index, cell) in nb.cells.iter().enumerate() {
+                let value = if scope == "outputs" {
+                    serde_json::to_string(&cell.outputs)?
+                } else {
+                    serde_json::to_string(&cell.metadata)?
+                };
+                if re.is_match(&value) {
+                    matches.push(
+                        json!({"index":index+1,"scope":scope,"cell_id":cell.id,"value":value}),
+                    );
+                }
+            }
+        } else {
+            bail!("scope must be outputs, cell-metadata, or notebook-metadata");
+        }
+        Ok(json!({"path":relative_display(&self.root,&path),"matches":matches}))
     }
 
     fn notebook_delete_cells(&self, args: &Value) -> Result<Value> {
@@ -466,13 +702,7 @@ fn tool_definitions() -> Vec<Value> {
             "Read selected notebook cells as structured JSON",
             schema(
                 &["path"],
-                json!({
-                    "path": string_prop("Workspace-relative .ipynb path"), "selection": string_prop("Cell selection; default all"),
-                    "include_source": bool_prop("Include each cell's source; default true"),
-                    "include_outputs": output_inclusion_prop("Include each code cell's outputs: true (default), false, or \"on_error\" to include only for cells whose outputs contain an error"),
-                    "output_lines": integer_prop("Max lines kept per output field before truncating; default 100"),
-                    "full_output": bool_prop("Return outputs in full, without truncation or binary omission")
-                }),
+                json!({"path": string_prop("Workspace-relative .ipynb path"), "selection": string_prop("Cell selection; default all"), "cell_type": enum_prop(&["code", "markdown", "raw"]), "lines": string_prop("1-based line selection within each cell"), "include_outputs": output_inclusion_prop("Include outputs: true, false, or on_error"), "include_source": bool_prop("Include source; false returns outputs only"), "output_lines": integer_prop("Max lines per output; default 100"), "max_output_chars": integer_prop("Maximum characters retained per textual output"), "full_output": bool_prop("Return complete outputs")}),
             ),
         ),
         tool(
@@ -480,17 +710,33 @@ fn tool_definitions() -> Vec<Value> {
             "Create a notebook cell",
             mutation_schema(
                 &["path"],
-                json!({"path": string_prop("Workspace-relative .ipynb path"), "cell_type": enum_prop(&["code", "markdown", "raw"]), "source": string_prop("Cell source"), "at": integer_prop("1-based insertion position")}),
+                json!({"path": string_prop("Workspace-relative .ipynb path"), "cell_type": enum_prop(&["code", "markdown", "raw"]), "source": string_prop("Cell source"), "source_path": string_prop("Workspace-relative text file used as cell source; conflicts with source"), "at": integer_prop("1-based insertion position")}),
             ),
         ),
         tool(
             "notebook_edit_cell",
-            "Replace a cell's source or type",
+            "Replace a cell's source/type, or edit source lines",
             mutation_schema(
                 &["path", "index"],
-                json!({"path": string_prop("Workspace-relative .ipynb path"), "index": integer_prop("1-based cell index"), "source": string_prop("Replacement source"), "cell_type": enum_prop(&["code", "markdown", "raw"])}),
+                json!({"path": string_prop("Workspace-relative .ipynb path"), "index": integer_prop("1-based cell index"), "source": string_prop("Replacement or inserted source"), "source_path": string_prop("Workspace-relative text file used as cell source; conflicts with source"), "cell_type": enum_prop(&["code", "markdown", "raw"]), "lines": string_prop("1-based line selection to replace"), "insert_after": integer_prop("Insert source after this 1-based line"), "insert_before": integer_prop("Insert source before this 1-based line"), "delete_lines": string_prop("1-based line selection to delete")}),
             ),
         ),
+        tool("notebook_search", "Search cell source with a regex", schema(&["path", "pattern"], json!({"path": string_prop("Workspace-relative .ipynb path"), "pattern": string_prop("Regex pattern"), "cell_type": enum_prop(&["code", "markdown", "raw"]), "ignore_case": bool_prop("Case-insensitive matching")}))),
+        tool(
+            "notebook_export_cell",
+            "Export one cell's source to a workspace file",
+            schema(
+                &["path", "index", "file_path"],
+                json!({"path": string_prop("Workspace-relative .ipynb path"), "index": integer_prop("1-based cell index"), "file_path": string_prop("Workspace-relative destination path"), "overwrite": bool_prop("Replace the destination if it already exists; default false")}),
+            ),
+        ),
+        tool("notebook_duplicate_cells", "Duplicate selected cells", mutation_schema(&["path", "selection"], json!({"path": string_prop("Workspace-relative .ipynb path"), "selection": string_prop("Cell selection"), "at": integer_prop("1-based insertion position")}))),
+        tool("notebook_strip", "Remove selected outputs and/or metadata", mutation_schema(&["path"], json!({"path": string_prop("Workspace-relative .ipynb path"), "selection": string_prop("Cell selection; default all"), "outputs": bool_prop("Clear outputs and execution counts"), "cell_metadata": bool_prop("Clear selected cell metadata"), "notebook_metadata": bool_prop("Clear notebook metadata"), "dry_run": bool_prop("Preview only")}))),
+        tool("notebook_validate", "Validate notebook cell types and IDs", schema(&["path"], json!({"path": string_prop("Workspace-relative .ipynb path")}))),
+        tool("notebook_list_cell_ids", "List cell IDs", schema(&["path"], json!({"path": string_prop("Workspace-relative .ipynb path")}))),
+        tool("notebook_find_cell_references", "Find literal cell-ID uses in other cell sources", schema(&["path", "cell_id"], json!({"path": string_prop("Workspace-relative .ipynb path"), "cell_id": string_prop("Existing cell ID")}))),
+        tool("notebook_render", "Render a notebook to HTML without executing it", schema(&["path", "output_path"], json!({"path": string_prop("Workspace-relative .ipynb path"), "output_path": string_prop("Workspace-relative HTML destination"), "overwrite": bool_prop("Replace destination if it exists"), "driver_python": string_prop("Python with nbconvert and nbformat")}))),
+        tool("notebook_query", "Search output or metadata JSON", schema(&["path", "pattern", "scope"], json!({"path": string_prop("Workspace-relative .ipynb path"), "pattern": string_prop("Regex"), "scope": enum_prop(&["outputs", "cell-metadata", "notebook-metadata"]), "ignore_case": bool_prop("Case-insensitive regex")}))),
         tool(
             "notebook_delete_cells",
             "Delete selected cells",
@@ -605,6 +851,16 @@ fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
         .and_then(Value::as_str)
         .with_context(|| format!("'{key}' must be a string"))
 }
+fn optional_str<'a>(value: &'a Value, key: &str) -> Result<Option<&'a str>> {
+    value
+        .get(key)
+        .map(|value| {
+            value
+                .as_str()
+                .with_context(|| format!("'{key}' must be a string"))
+        })
+        .transpose()
+}
 fn required_usize(value: &Value, key: &str) -> Result<usize> {
     optional_usize(value, key)?.with_context(|| format!("'{key}' is required"))
 }
@@ -691,7 +947,96 @@ fn relative_display(root: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
+fn truncate_outputs(outputs: &[Value], max_chars: Option<usize>) -> Value {
+    let Some(limit) = max_chars else {
+        return json!(outputs);
+    };
+    let mut outputs = outputs.to_vec();
+    for output in &mut outputs {
+        truncate_output_value(output, limit);
+    }
+    json!(outputs)
+}
+
+fn truncate_output_value(value: &mut Value, limit: usize) {
+    match value {
+        Value::String(text) => {
+            let mut chars = text.chars();
+            let truncated: String = chars.by_ref().take(limit).collect();
+            if chars.next().is_some() {
+                *text = format!("{truncated}\n... output truncated ...\n");
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                truncate_output_value(value, limit);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values_mut() {
+                truncate_output_value(value, limit);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn resolve_existing_notebook(root: &Path, raw: &str) -> Result<PathBuf> {
+    let path = resolve_existing_workspace_path(root, raw, "notebook")?;
+    if path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("ipynb"))
+        != Some(true)
+    {
+        bail!("Only .ipynb files are allowed");
+    }
+    Ok(path)
+}
+
+fn resolve_existing_source_file(root: &Path, raw: &str) -> Result<PathBuf> {
+    let path = resolve_existing_workspace_path(root, raw, "source file")?;
+    if !path.is_file() {
+        bail!("Source path must be a regular file");
+    }
+    Ok(path)
+}
+
+fn resolve_workspace_output_file(root: &Path, raw: &str) -> Result<PathBuf> {
+    let supplied = Path::new(raw);
+    if supplied
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        bail!("Parent-directory traversal is not allowed");
+    }
+    let path = if supplied.is_absolute() {
+        supplied.to_path_buf()
+    } else {
+        root.join(supplied)
+    };
+    let parent = path
+        .parent()
+        .context("Export path has no parent directory")?;
+    let canonical_parent = std::fs::canonicalize(parent)
+        .with_context(|| format!("Cannot access export directory '{}'", parent.display()))?;
+    if !canonical_parent.starts_with(root) {
+        bail!("Export path is outside the configured workspace root");
+    }
+    if path.exists() {
+        let canonical = std::fs::canonicalize(&path)
+            .with_context(|| format!("Cannot access export file '{}'", path.display()))?;
+        if !canonical.starts_with(root) {
+            bail!("Export path is outside the configured workspace root");
+        }
+        if !canonical.is_file() {
+            bail!("Export path must be a regular file");
+        }
+    }
+    Ok(path)
+}
+
+fn resolve_existing_workspace_path(root: &Path, raw: &str, label: &str) -> Result<PathBuf> {
     let supplied = Path::new(raw);
     if supplied
         .components()
@@ -705,19 +1050,28 @@ fn resolve_existing_notebook(root: &Path, raw: &str) -> Result<PathBuf> {
         root.join(supplied)
     };
     let path = std::fs::canonicalize(&joined)
-        .with_context(|| format!("Cannot access notebook '{}'", joined.display()))?;
+        .with_context(|| format!("Cannot access {label} '{}'", joined.display()))?;
     if !path.starts_with(root) {
-        bail!("Notebook is outside the configured workspace root");
-    }
-    if path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("ipynb"))
-        != Some(true)
-    {
-        bail!("Only .ipynb files are allowed");
+        bail!("{label} is outside the configured workspace root");
     }
     Ok(path)
+}
+
+fn source_from_args(args: &Value, root: &Path) -> Result<Option<String>> {
+    let source = optional_str(args, "source")?;
+    let source_path = optional_str(args, "source_path")?;
+    if source.is_some() && source_path.is_some() {
+        bail!("'source' and 'source_path' cannot be used together");
+    }
+    match source_path {
+        Some(path) => {
+            let path = resolve_existing_source_file(root, path)?;
+            Ok(Some(std::fs::read_to_string(&path).with_context(|| {
+                format!("Cannot read source file '{}'", path.display())
+            })?))
+        }
+        None => Ok(source.map(str::to_owned)),
+    }
 }
 
 fn collect_notebooks(
@@ -843,6 +1197,101 @@ mod tests {
         assert_eq!(edit["isError"], false);
         let read = server.notebook_read(&json!({"path":"test.ipynb"})).unwrap();
         assert_eq!(read["cells"][0]["cell"]["source"][0], "x = 2");
+    }
+
+    #[test]
+    fn search_and_line_edits_return_structured_results() {
+        let (dir, server) = server();
+        write_notebook(dir.path());
+        let search = server
+            .notebook_search(&json!({"path":"test.ipynb", "pattern":"x = 1"}))
+            .unwrap();
+        assert_eq!(search["match_count"], 1);
+        server
+            .notebook_edit_cell(&json!({"path":"test.ipynb", "index":1, "insert_after":1, "source":"print(x)", "backup":false}))
+            .unwrap();
+        let nb = Notebook::from_file(dir.path().join("test.ipynb").to_str().unwrap()).unwrap();
+        assert_eq!(nb.cells[0].source_str(), "x = 1\nprint(x)");
+    }
+
+    #[test]
+    fn read_filters_lines_and_truncates_outputs() {
+        let (dir, server) = server();
+        write_notebook(dir.path());
+        let path = dir.path().join("test.ipynb");
+        let mut nb = Notebook::from_file(path.to_str().unwrap()).unwrap();
+        nb.cells[0].set_source("first\nsecond".into());
+        nb.cells[0].outputs = vec![json!({"output_type":"stream", "text":"abcdefgh"})];
+        nb.save(path.to_str().unwrap(), false).unwrap();
+        let read = server.notebook_read(&json!({"path":"test.ipynb", "lines":"2", "include_outputs":true, "max_output_chars":3})).unwrap();
+        assert_eq!(read["cells"][0]["source"][0]["text"], "second");
+        assert_eq!(
+            read["cells"][0]["outputs"][0]["text"],
+            "abc\n... output truncated ...\n"
+        );
+    }
+
+    #[test]
+    fn cell_source_can_be_read_from_a_workspace_file() {
+        let (dir, server) = server();
+        write_notebook(dir.path());
+        std::fs::create_dir(dir.path().join("snippets")).unwrap();
+        std::fs::write(dir.path().join("snippets/cell.py"), "x = 2\ny = 3\n").unwrap();
+
+        let create = server.call_tool(&json!({"name":"notebook_create_cell", "arguments":{"path":"test.ipynb", "source_path":"snippets/cell.py", "backup":false}})).unwrap();
+        assert_eq!(create["isError"], false);
+        let read = server
+            .notebook_read(&json!({"path":"test.ipynb", "selection":"2"}))
+            .unwrap();
+        assert_eq!(
+            read["cells"][0]["cell"]["source"],
+            json!(["x = 2\n", "y = 3\n"])
+        );
+
+        std::fs::write(dir.path().join("snippets/cell.py"), "x = 4").unwrap();
+        let edit = server
+            .call_tool(&json!({"name":"notebook_edit_cell", "arguments":{"path":"test.ipynb", "index":1, "source_path":"snippets/cell.py", "backup":false}}))
+            .unwrap();
+        assert_eq!(edit["isError"], false);
+        let read = server
+            .notebook_read(&json!({"path":"test.ipynb", "selection":"1"}))
+            .unwrap();
+        assert_eq!(read["cells"][0]["cell"]["source"], json!(["x = 4"]));
+    }
+
+    #[test]
+    fn exports_cell_source_to_a_workspace_file() {
+        let (dir, server) = server();
+        write_notebook(dir.path());
+        let result = server
+            .notebook_export_cell(&json!({"path":"test.ipynb", "index":1, "file_path":"cell.py"}))
+            .unwrap();
+        assert_eq!(result["exported_cell"], 1);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("cell.py")).unwrap(),
+            "x = 1"
+        );
+        assert!(server
+            .notebook_export_cell(
+                &json!({"path":"test.ipynb", "index":1, "file_path":"../outside.py"}),
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn source_path_cannot_escape_workspace_or_conflict_with_source() {
+        let (dir, server) = server();
+        write_notebook(dir.path());
+        assert!(source_from_args(&json!({"source_path":"../outside.py"}), &server.root).is_err());
+        assert!(server
+            .notebook_edit_cell(
+                &json!({"path":"test.ipynb", "index":1, "source":"x", "source_path":"test.ipynb"})
+            )
+            .is_err());
+        assert!(server
+            .notebook_edit_cell(&json!({"path":"test.ipynb", "index":1}))
+            .is_err());
+        assert!(!dir.path().join("test.ipynb.bak").exists());
     }
 
     #[test]

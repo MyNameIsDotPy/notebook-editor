@@ -11,6 +11,8 @@ pub struct Notebook {
     pub nbformat_minor: u32,
     pub metadata: Value,
     pub cells: Vec<Cell>,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -142,6 +144,7 @@ mod tests {
             nbformat_minor: 5,
             metadata: serde_json::json!({}),
             cells: vec![first, code("b = 2"), code("c = 3")],
+            extra: BTreeMap::new(),
         };
         nb.ensure_cell_ids();
         let ids: Vec<_> = nb
@@ -193,6 +196,7 @@ mod tests {
             nbformat_minor: 5,
             metadata: serde_json::json!({}),
             cells: vec![code("x = 1")],
+            extra: BTreeMap::new(),
         };
         nb.save(path.to_str().unwrap(), true).unwrap();
         let saved = Notebook::from_file(path.to_str().unwrap()).unwrap();
