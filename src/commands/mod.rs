@@ -3,16 +3,24 @@ pub mod copy;
 pub mod create;
 pub mod delete;
 pub mod diff;
+pub mod duplicate;
 pub mod edit;
+pub mod export;
+pub mod ids;
 pub mod info;
 pub mod kernels;
 pub mod r#move;
+pub mod query;
 pub mod read;
+pub mod refs;
+pub mod render;
 pub mod replace;
 pub mod run;
 pub mod search;
 pub mod session;
 pub mod session_client;
+pub mod strip;
+pub mod validate;
 
 use crate::cli::{Cli, Command, SessionAction};
 use anyhow::Result;
@@ -24,6 +32,8 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             selection,
             r#type,
             show_outputs,
+            only_outputs,
+            max_output_chars,
             json,
             lines,
         } => read::run(
@@ -31,6 +41,8 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             &selection,
             r#type.as_ref().map(|t| t.as_str()),
             show_outputs,
+            only_outputs,
+            max_output_chars,
             json,
             lines.as_deref(),
         ),
@@ -50,6 +62,55 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             cli.backup,
             cli.quiet,
         ),
+
+        Command::Export {
+            notebook,
+            index,
+            file,
+            force,
+        } => export::run(&notebook, index, &file, force, cli.quiet),
+
+        Command::Duplicate {
+            notebook,
+            selection,
+            at,
+        } => duplicate::run(&notebook, &selection, at, cli.backup, cli.quiet),
+
+        Command::Strip {
+            notebook,
+            selection,
+            outputs,
+            cell_metadata,
+            notebook_metadata,
+            dry_run,
+        } => strip::run(
+            &notebook,
+            &selection,
+            outputs,
+            cell_metadata,
+            notebook_metadata,
+            dry_run,
+            cli.backup,
+            cli.quiet,
+        ),
+
+        Command::Validate { notebook, json } => validate::run(&notebook, json),
+
+        Command::Ids { notebook, json } => ids::run(&notebook, json),
+        Command::Refs { notebook, to, json } => refs::run(&notebook, &to, json),
+        Command::Render {
+            notebook,
+            output,
+            force,
+            driver_python,
+        } => render::run(&notebook, &output, force, driver_python.as_deref()),
+        Command::Query {
+            notebook,
+            pattern,
+            scope,
+            ignore_case,
+            json,
+        } => query::run(&notebook, &pattern, &scope, ignore_case, json),
 
         Command::Edit {
             notebook,

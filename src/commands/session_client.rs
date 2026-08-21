@@ -14,7 +14,18 @@ use std::hash::{BuildHasher, Hasher};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[derive(Debug)]
+pub struct OverallTimeout;
+
+impl std::fmt::Display for OverallTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Overall execution timeout expired")
+    }
+}
+
+impl std::error::Error for OverallTimeout {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
@@ -169,6 +180,7 @@ pub fn shutdown(record: &SessionRecord, timeout: Duration) -> Result<()> {
 pub struct CellRequest {
     pub id: String,
     pub source: String,
+    pub metadata: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -199,6 +211,7 @@ pub fn execute(
     timeout: i64,
     record_timing: bool,
     overall_timeout: Option<u64>,
+    iopub_timeout: u64,
 ) -> Result<ExecuteResponse> {
     let payload = serde_json::json!({
         "cmd": "execute",
@@ -206,12 +219,53 @@ pub fn execute(
         "allow_errors": allow_errors,
         "timeout": timeout,
         "record_timing": record_timing,
+        "iopub_timeout": iopub_timeout,
     });
-    // No read timeout unless the caller bounded the whole operation: a cell
-    // may legitimately run for a long time, same as one-shot `run --timeout -1`.
-    let read_timeout = overall_timeout.map(Duration::from_secs);
-    let response = request_with_read_timeout(record, payload, read_timeout)?;
+    let response = match overall_timeout {
+        Some(seconds) => request_with_deadline(
+            record,
+            payload,
+            Instant::now() + Duration::from_secs(seconds),
+        )?,
+        None => request_with_read_timeout(record, payload, None)?,
+    };
     serde_json::from_value(response).context("Malformed response from session daemon")
+}
+
+fn request_with_deadline(
+    record: &SessionRecord,
+    payload: Value,
+    deadline: Instant,
+) -> Result<Value> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|duration| !duration.is_zero())
+        .ok_or(OverallTimeout)?;
+    let addr: SocketAddr = format!("127.0.0.1:{}", record.port)
+        .parse()
+        .context("Invalid session address")?;
+    let mut stream = TcpStream::connect_timeout(&addr, remaining).with_context(|| {
+        format!(
+            "Cannot connect to session '{}' on port {} (is it still running? try 'nbedit session list')",
+            record.name, record.port
+        )
+    })?;
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|duration| !duration.is_zero())
+        .ok_or(OverallTimeout)?;
+    stream.set_read_timeout(Some(remaining))?;
+    stream.set_write_timeout(Some(remaining))?;
+    send_and_read(record, &mut stream, payload).map_err(|error| {
+        if error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::TimedOut)
+        {
+            OverallTimeout.into()
+        } else {
+            error
+        }
+    })
 }
 
 fn request(record: &SessionRecord, payload: Value, timeout: Duration) -> Result<Value> {
@@ -220,7 +274,7 @@ fn request(record: &SessionRecord, payload: Value, timeout: Duration) -> Result<
 
 fn request_with_read_timeout(
     record: &SessionRecord,
-    mut payload: Value,
+    payload: Value,
     read_timeout: Option<Duration>,
 ) -> Result<Value> {
     let addr: SocketAddr = format!("127.0.0.1:{}", record.port)
@@ -236,6 +290,14 @@ fn request_with_read_timeout(
     )?;
     stream.set_read_timeout(read_timeout)?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    send_and_read(record, &mut stream, payload)
+}
+
+fn send_and_read(
+    record: &SessionRecord,
+    stream: &mut TcpStream,
+    mut payload: Value,
+) -> Result<Value> {
     payload
         .as_object_mut()
         .expect("request payload is always a JSON object")
@@ -319,12 +381,13 @@ pub fn build_daemon_script(kernel_name: &str, token: &str, startup_timeout: u64)
         "                client.allow_errors = bool(req.get('allow_errors', False))".to_string(),
         "                client.record_timing = bool(req.get('record_timing', True))".to_string(),
         "                client.timeout = req.get('timeout', -1)".to_string(),
+        "                client.iopub_timeout = req.get('iopub_timeout', 4)".to_string(),
         "                results = []".to_string(),
         "                status = 'ok'".to_string(),
         "                failed_id = None".to_string(),
         "                message = None".to_string(),
         "                for cell_req in req.get('cells', []):".to_string(),
-        "                    cell = nbformat.v4.new_code_cell(cell_req['source'])".to_string(),
+        "                    cell = nbformat.v4.new_code_cell(cell_req['source'], metadata=cell_req.get('metadata', {}))".to_string(),
         "                    nb.cells.append(cell)".to_string(),
         "                    index = len(nb.cells) - 1".to_string(),
         "                    try:".to_string(),
@@ -439,5 +502,30 @@ mod tests {
             "{}\n{script}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn daemon_script_preserves_metadata_and_honors_iopub_timeout() {
+        let script = build_daemon_script("python3", "tok", 60);
+        assert!(script.contains("metadata=cell_req.get('metadata', {})"));
+        assert!(script.contains("client.iopub_timeout = req.get('iopub_timeout', 4)"));
+    }
+
+    #[test]
+    fn zero_overall_timeout_fails_before_connecting() {
+        let record = SessionRecord {
+            id: "id".into(),
+            name: "test".into(),
+            kernel_label: "python3".into(),
+            display_name: "Python 3".into(),
+            language: Some("python".into()),
+            pid: 0,
+            port: 1,
+            token: "token".into(),
+            cwd: ".".into(),
+            created_at: 0,
+        };
+        let error = execute(&record, &[], false, -1, true, Some(0), 4).unwrap_err();
+        assert!(error.downcast_ref::<OverallTimeout>().is_some());
     }
 }

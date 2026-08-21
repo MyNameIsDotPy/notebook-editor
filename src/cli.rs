@@ -41,6 +41,14 @@ pub enum Command {
         #[arg(long)]
         show_outputs: bool,
 
+        /// Print outputs without cell source (implies --show-outputs)
+        #[arg(long)]
+        only_outputs: bool,
+
+        /// Maximum characters printed per output
+        #[arg(long)]
+        max_output_chars: Option<usize>,
+
         /// Emit the full cell JSON instead of plain source
         #[arg(long)]
         json: bool,
@@ -48,6 +56,90 @@ pub enum Command {
         /// Only print specific lines within each cell (same syntax as cell selection)
         #[arg(long)]
         lines: Option<String>,
+    },
+
+    /// Export one cell's source to a file
+    Export {
+        /// Path to the notebook file
+        notebook: String,
+
+        /// Index of the cell to export (1-based)
+        index: usize,
+
+        /// Destination file path
+        file: String,
+
+        /// Replace the destination if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Duplicate selected cells in the same notebook
+    Duplicate {
+        notebook: String,
+        selection: String,
+        #[arg(long)]
+        at: Option<usize>,
+    },
+
+    /// Remove outputs and/or metadata
+    Strip {
+        notebook: String,
+        #[arg(default_value = "all")]
+        selection: String,
+        #[arg(long)]
+        outputs: bool,
+        #[arg(long)]
+        cell_metadata: bool,
+        #[arg(long)]
+        notebook_metadata: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Validate notebook structure and cell IDs
+    Validate {
+        notebook: String,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List public cell IDs
+    Ids {
+        notebook: String,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Find literal uses of a cell ID in other cell sources
+    Refs {
+        notebook: String,
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Render a notebook to HTML without executing it
+    Render {
+        notebook: String,
+        output: String,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        driver_python: Option<String>,
+    },
+
+    /// Search cell outputs or metadata as JSON
+    Query {
+        notebook: String,
+        pattern: String,
+        #[arg(long)]
+        scope: String,
+        #[arg(short = 'i', long)]
+        ignore_case: bool,
+        #[arg(long)]
+        json: bool,
     },
 
     /// Create a new cell

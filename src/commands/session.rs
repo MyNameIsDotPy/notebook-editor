@@ -342,6 +342,7 @@ fn resolve_kernel(
                 nbformat_minor: 5,
                 metadata: json!({}),
                 cells: Vec::new(),
+                extra: Default::default(),
             };
             // `resolve` only reads the parent directory of this path for
             // workspace-scoped kernel discovery; the file itself need not exist.
@@ -374,10 +375,14 @@ fn unique_id(dir: &Path) -> Result<String> {
 
 fn kill_pid(pid: u32) -> Result<()> {
     #[cfg(unix)]
-    let status = Command::new("kill").args(["-9", &pid.to_string()]).status();
+    // The daemon owns a separate process group and the kernel is its child.
+    // Targeting the group prevents an orphaned kernel after a forced stop.
+    let status = Command::new("kill")
+        .args(["-KILL", &format!("-{pid}")])
+        .status();
     #[cfg(windows)]
     let status = Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/F"])
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
         .status();
     match status {
         Ok(status) if status.success() => Ok(()),
