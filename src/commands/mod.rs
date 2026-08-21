@@ -1,3 +1,4 @@
+pub mod bookmark;
 pub mod clear;
 pub mod copy;
 pub mod create;
@@ -9,20 +10,23 @@ pub mod export;
 pub mod ids;
 pub mod info;
 pub mod kernels;
+pub mod merge;
 pub mod r#move;
 pub mod query;
 pub mod read;
 pub mod refs;
+pub mod rename_id;
 pub mod render;
 pub mod replace;
 pub mod run;
 pub mod search;
 pub mod session;
 pub mod session_client;
+pub mod split;
 pub mod strip;
 pub mod validate;
 
-use crate::cli::{Cli, Command, SessionAction};
+use crate::cli::{BookmarkAction, Cli, Command, SessionAction};
 use anyhow::Result;
 
 pub fn dispatch(cli: Cli) -> Result<()> {
@@ -102,8 +106,31 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         ),
 
         Command::Validate { notebook, json } => validate::run(&notebook, json),
+        Command::Repair { notebook } => validate::repair(&notebook, cli.backup, cli.quiet),
+        Command::Bookmark { notebook, action } => match action {
+            BookmarkAction::Set { name, index } => {
+                bookmark::set(&notebook, &name, index, cli.backup, cli.quiet)
+            }
+            BookmarkAction::List { json } => bookmark::list(&notebook, json),
+            BookmarkAction::Remove { name } => {
+                bookmark::remove(&notebook, &name, cli.backup, cli.quiet)
+            }
+        },
 
         Command::Ids { notebook, json } => ids::run(&notebook, json),
+
+        Command::Merge {
+            notebook,
+            selection,
+        } => merge::run(&notebook, &selection, cli.backup, cli.quiet),
+        Command::Split {
+            notebook,
+            index,
+            at_line,
+        } => split::run(&notebook, index, at_line, cli.backup, cli.quiet),
+        Command::RenameId { notebook, old, new } => {
+            rename_id::run(&notebook, &old, &new, cli.backup, cli.quiet)
+        }
         Command::Refs { notebook, to, json } => refs::run(&notebook, &to, json),
         Command::Render {
             notebook,

@@ -112,11 +112,39 @@ pub enum Command {
         json: bool,
     },
 
+    /// Repair missing or duplicate IDs and invalid cell metadata
+    Repair { notebook: String },
+
+    /// Save named references to cells in notebook metadata
+    Bookmark {
+        notebook: String,
+        #[command(subcommand)]
+        action: BookmarkAction,
+    },
+
     /// List public cell IDs
     Ids {
         notebook: String,
         #[arg(long)]
         json: bool,
+    },
+
+    /// Merge contiguous cells of the same type
+    Merge { notebook: String, selection: String },
+
+    /// Split a cell before a 1-based line number
+    Split {
+        notebook: String,
+        index: usize,
+        #[arg(long)]
+        at_line: usize,
+    },
+
+    /// Rename a cell's stable ID
+    RenameId {
+        notebook: String,
+        old: String,
+        new: String,
     },
 
     /// Find literal uses of a cell ID in other cell sources
@@ -472,6 +500,21 @@ pub enum Command {
     Session {
         #[command(subcommand)]
         action: SessionAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum BookmarkAction {
+    Set {
+        name: String,
+        index: usize,
+    },
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    Remove {
+        name: String,
     },
 }
 

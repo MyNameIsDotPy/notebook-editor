@@ -108,8 +108,16 @@ impl McpServer {
             "notebook_search" => self.notebook_search(&arguments),
             "notebook_export_cell" => self.notebook_export_cell(&arguments),
             "notebook_duplicate_cells" => self.notebook_duplicate_cells(&arguments),
+            "notebook_merge_cells" => self.notebook_merge_cells(&arguments),
+            "notebook_split_cell" => self.notebook_split_cell(&arguments),
+            "notebook_rename_cell_id" => self.notebook_rename_cell_id(&arguments),
+            "notebook_move_cells" => self.notebook_move_cells(&arguments),
             "notebook_strip" => self.notebook_strip(&arguments),
             "notebook_validate" => self.notebook_validate(&arguments),
+            "notebook_repair" => self.notebook_repair(&arguments),
+            "notebook_bookmark_set" => self.notebook_bookmark_set(&arguments),
+            "notebook_bookmark_list" => self.notebook_bookmark_list(&arguments),
+            "notebook_bookmark_remove" => self.notebook_bookmark_remove(&arguments),
             "notebook_list_cell_ids" => self.notebook_list_cell_ids(&arguments),
             "notebook_find_cell_references" => self.notebook_find_cell_references(&arguments),
             "notebook_render" => self.notebook_render(&arguments),
@@ -344,6 +352,53 @@ impl McpServer {
         Ok(json!({"path": relative_display(&self.root, &path), "status": "ok"}))
     }
 
+    fn notebook_merge_cells(&self, args: &Value) -> Result<Value> {
+        let path = self.notebook_path(args)?;
+        crate::commands::merge::run(
+            path_str(&path)?,
+            required_str(args, "selection")?,
+            backup(args),
+            true,
+        )?;
+        Ok(json!({"path":relative_display(&self.root,&path),"status":"ok"}))
+    }
+
+    fn notebook_split_cell(&self, args: &Value) -> Result<Value> {
+        let path = self.notebook_path(args)?;
+        crate::commands::split::run(
+            path_str(&path)?,
+            required_usize(args, "index")?,
+            required_usize(args, "at_line")?,
+            backup(args),
+            true,
+        )?;
+        Ok(json!({"path":relative_display(&self.root,&path),"status":"ok"}))
+    }
+
+    fn notebook_rename_cell_id(&self, args: &Value) -> Result<Value> {
+        let path = self.notebook_path(args)?;
+        crate::commands::rename_id::run(
+            path_str(&path)?,
+            required_str(args, "old")?,
+            required_str(args, "new")?,
+            backup(args),
+            true,
+        )?;
+        Ok(json!({"path":relative_display(&self.root,&path),"status":"ok"}))
+    }
+
+    fn notebook_move_cells(&self, args: &Value) -> Result<Value> {
+        let path = self.notebook_path(args)?;
+        crate::commands::r#move::run(
+            path_str(&path)?,
+            required_str(args, "selection")?,
+            required_str(args, "to")?,
+            backup(args),
+            true,
+        )?;
+        Ok(json!({"path":relative_display(&self.root,&path),"status":"ok"}))
+    }
+
     fn notebook_strip(&self, args: &Value) -> Result<Value> {
         let path = self.notebook_path(args)?;
         crate::commands::strip::run(
@@ -387,6 +442,40 @@ impl McpServer {
         Ok(
             json!({"path": relative_display(&self.root, &path), "valid": issues.is_empty(), "issues": issues}),
         )
+    }
+
+    fn notebook_repair(&self, args: &Value) -> Result<Value> {
+        let path = self.notebook_path(args)?;
+        crate::commands::validate::repair(path_str(&path)?, backup(args), true)?;
+        Ok(json!({"path":relative_display(&self.root,&path),"status":"ok"}))
+    }
+    fn notebook_bookmark_set(&self, args: &Value) -> Result<Value> {
+        let path = self.notebook_path(args)?;
+        crate::commands::bookmark::set(
+            path_str(&path)?,
+            required_str(args, "name")?,
+            required_usize(args, "index")?,
+            backup(args),
+            true,
+        )?;
+        Ok(json!({"path":relative_display(&self.root,&path),"status":"ok"}))
+    }
+    fn notebook_bookmark_list(&self, args: &Value) -> Result<Value> {
+        let path = self.notebook_path(args)?;
+        let nb = Notebook::from_file(path_str(&path)?)?;
+        Ok(
+            json!({"path":relative_display(&self.root,&path),"bookmarks":nb.metadata.pointer("/nbedit/bookmarks").cloned().unwrap_or_else(||json!({}))}),
+        )
+    }
+    fn notebook_bookmark_remove(&self, args: &Value) -> Result<Value> {
+        let path = self.notebook_path(args)?;
+        crate::commands::bookmark::remove(
+            path_str(&path)?,
+            required_str(args, "name")?,
+            backup(args),
+            true,
+        )?;
+        Ok(json!({"path":relative_display(&self.root,&path),"status":"ok"}))
     }
 
     fn notebook_list_cell_ids(&self, args: &Value) -> Result<Value> {
@@ -731,8 +820,16 @@ fn tool_definitions() -> Vec<Value> {
             ),
         ),
         tool("notebook_duplicate_cells", "Duplicate selected cells", mutation_schema(&["path", "selection"], json!({"path": string_prop("Workspace-relative .ipynb path"), "selection": string_prop("Cell selection"), "at": integer_prop("1-based insertion position")}))),
+        tool("notebook_merge_cells", "Merge contiguous cells of the same type", mutation_schema(&["path", "selection"], json!({"path":string_prop("Workspace-relative .ipynb path"),"selection":string_prop("Contiguous cell selection")}))),
+        tool("notebook_split_cell", "Split a cell before a line", mutation_schema(&["path", "index", "at_line"], json!({"path":string_prop("Workspace-relative .ipynb path"),"index":integer_prop("1-based cell index"),"at_line":integer_prop("Split before this 1-based line")}))),
+        tool("notebook_rename_cell_id", "Rename a stable cell ID", mutation_schema(&["path", "old", "new"], json!({"path":string_prop("Workspace-relative .ipynb path"),"old":string_prop("Existing cell ID"),"new":string_prop("New unique cell ID")}))),
+        tool("notebook_move_cells", "Move selected cells", mutation_schema(&["path", "selection", "to"], json!({"path":string_prop("Workspace-relative .ipynb path"),"selection":string_prop("Cell selection"),"to":string_prop("1-based destination or last")}))),
         tool("notebook_strip", "Remove selected outputs and/or metadata", mutation_schema(&["path"], json!({"path": string_prop("Workspace-relative .ipynb path"), "selection": string_prop("Cell selection; default all"), "outputs": bool_prop("Clear outputs and execution counts"), "cell_metadata": bool_prop("Clear selected cell metadata"), "notebook_metadata": bool_prop("Clear notebook metadata"), "dry_run": bool_prop("Preview only")}))),
         tool("notebook_validate", "Validate notebook cell types and IDs", schema(&["path"], json!({"path": string_prop("Workspace-relative .ipynb path")}))),
+        tool("notebook_repair", "Repair missing/duplicate IDs and cell metadata", mutation_schema(&["path"],json!({"path":string_prop("Workspace-relative .ipynb path")}))),
+        tool("notebook_bookmark_set", "Save a name for a cell ID", mutation_schema(&["path","name","index"],json!({"path":string_prop("Workspace-relative .ipynb path"),"name":string_prop("Bookmark name"),"index":integer_prop("1-based cell index")}))),
+        tool("notebook_bookmark_list", "List named cell bookmarks", schema(&["path"],json!({"path":string_prop("Workspace-relative .ipynb path")}))),
+        tool("notebook_bookmark_remove", "Remove a bookmark", mutation_schema(&["path","name"],json!({"path":string_prop("Workspace-relative .ipynb path"),"name":string_prop("Bookmark name")}))),
         tool("notebook_list_cell_ids", "List cell IDs", schema(&["path"], json!({"path": string_prop("Workspace-relative .ipynb path")}))),
         tool("notebook_find_cell_references", "Find literal cell-ID uses in other cell sources", schema(&["path", "cell_id"], json!({"path": string_prop("Workspace-relative .ipynb path"), "cell_id": string_prop("Existing cell ID")}))),
         tool("notebook_render", "Render a notebook to HTML without executing it", schema(&["path", "output_path"], json!({"path": string_prop("Workspace-relative .ipynb path"), "output_path": string_prop("Workspace-relative HTML destination"), "overwrite": bool_prop("Replace destination if it exists"), "driver_python": string_prop("Python with nbconvert and nbformat")}))),
