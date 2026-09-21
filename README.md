@@ -382,6 +382,8 @@ The driver and kernel are separate processes: the driver needs `nbclient` and `n
 
 Exit codes are `0` for completed execution (including allowed errors), `1` for execution or cell failure, `2` for missing driver dependencies, `124` for an overall timeout, and `130` for Ctrl-C. Available partial outputs are saved when the driver can shut down cleanly.
 
+Unless `--quiet` or `--json` is set, one-shot `run` (not `--session`) prints a `[nbedit] cell <N> (<i>/<total>): starting`/`...: done` line to stderr as each selected cell begins and finishes, where `<N>` is the cell's 1-based number in the notebook (matching `nbedit read`'s numbering) and `<i>/<total>` its position within this run. This is best-effort: it needs `nbclient`'s `on_cell_start`/`on_cell_complete` hooks (present since nbclient 0.6), and is silently omitted — never an error — on an older `nbclient`. `--session` execution has no equivalent yet; it still reports only the final result.
+
 ---
 
 ### Kernels

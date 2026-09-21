@@ -11,6 +11,7 @@
 - Preserve nbformat data not explicitly changed: `Cell.extra` flattens unknown cell fields, and source is normalized to an array of newline-inclusive lines by `Cell::set_source`.
 - Mutating paths save through `Notebook::save`, which writes atomically and optionally creates a `.bak`; do not replace it with direct file writes.
 - `run` has separate Python requirements: the driver needs `nbclient` and `nbformat`; a Python kernel interpreter needs `ipykernel`. Automatic resolution is intentional, so keep explicit driver/interpreter flags as overrides.
+- One-shot `run`'s generated driver script (`build_script` in `src/commands/run.rs`) prints per-cell `[nbedit] cell N (i/total): starting`/`...: done` progress to stderr, gated by `!quiet && !json` (never pollutes `--json` stdout), via `nbclient`'s `on_cell_start`/`on_cell_complete` hooks assigned post-construction inside a bare `try/except` — verified against real `nbclient` 0.11.0 source before writing (`run_hook()` just calls `hook(**kwargs)`, awaiting only if the result is awaitable, so a plain sync function works), and the `except` means an older `nbclient` lacking those `Callable` traitlets silently loses the progress lines instead of breaking execution. `run --session`'s daemon RPC (`session_client.rs`) has no equivalent — it's one blocking request/response, not a per-cell stream; that would need a real protocol change, not a copy of this hook.
 - One-shot `run` execution is stateless. Persistent state is only via `session`; it is incompatible with `--include-prior`.
 
 ## Verification

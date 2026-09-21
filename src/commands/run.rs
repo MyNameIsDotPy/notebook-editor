@@ -173,6 +173,8 @@ pub fn run(
         startup_timeout,
         iopub_timeout,
         record_timing,
+        &execution_indices,
+        !quiet && !json,
     );
     let driver = find_driver_python(driver_python, &candidate)?;
     let kernel_cwd = cwd
@@ -616,6 +618,8 @@ fn build_script(
     startup_timeout: u64,
     iopub_timeout: u64,
     record_timing: bool,
+    execution_indices: &[usize],
+    verbose: bool,
 ) -> String {
     // JSON string literals are valid Python string literals and safely handle
     // quotes, control characters, Windows separators, and Unicode paths.
@@ -629,7 +633,42 @@ fn build_script(
     };
     let allow_errors = if allow_errors { "True" } else { "False" };
     let record_timing = if record_timing { "True" } else { "False" };
-    let lines = vec![
+    // 1-based original notebook cell numbers, in the same order as the mini-notebook's cells
+    // (see `execution_indices` at the call site) — lets the progress hooks below report the
+    // number a human/agent actually sees via `nbedit read`, not nbclient's own 0-based position
+    // within this temporary subset.
+    let cell_numbers: Vec<usize> = execution_indices.iter().map(|i| i + 1).collect();
+    let cell_numbers_repr =
+        serde_json::to_string(&cell_numbers).expect("number serialization cannot fail");
+    // Progress hooks print to stderr (matching this file's existing eprintln! convention for
+    // status/progress text, e.g. "Executing N code cell(s)..." above) so they never mix into a
+    // `--json` caller's stdout, and are gated by the same `!quiet && !json` computed at the call
+    // site — `verbose=false` omits this block entirely, leaving the generated script identical
+    // to before this feature existed. Assigning `on_cell_start`/`on_cell_complete` (rather than
+    // passing them as NotebookClient constructor kwargs) and guarding the assignment in a bare
+    // `try/except` means an nbclient version too old to have these Callable traitlets just loses
+    // the progress lines instead of breaking execution — confirmed against the real nbclient
+    // 0.11.0 source (`client.py`): both hooks are called with plain `hook(**kwargs)`, only
+    // awaited if the return value is itself awaitable, so a plain sync function is valid.
+    let progress_hooks = if verbose {
+        vec![
+            format!("        _nbedit_cells = {cell_numbers_repr}"),
+            "        def _nbedit_cell_start(cell=None, cell_index=None, **_kw):".to_string(),
+            "            n = _nbedit_cells[cell_index] if cell_index is not None and 0 <= cell_index < len(_nbedit_cells) else '?'".to_string(),
+            "            print(f'[nbedit] cell {n} ({(cell_index or 0) + 1}/{len(_nbedit_cells)}): starting', file=sys.stderr, flush=True)".to_string(),
+            "        def _nbedit_cell_complete(cell=None, cell_index=None, **_kw):".to_string(),
+            "            n = _nbedit_cells[cell_index] if cell_index is not None and 0 <= cell_index < len(_nbedit_cells) else '?'".to_string(),
+            "            print(f'[nbedit] cell {n} ({(cell_index or 0) + 1}/{len(_nbedit_cells)}): done', file=sys.stderr, flush=True)".to_string(),
+            "        try:".to_string(),
+            "            client.on_cell_start = _nbedit_cell_start".to_string(),
+            "            client.on_cell_complete = _nbedit_cell_complete".to_string(),
+            "        except Exception:".to_string(),
+            "            pass".to_string(),
+        ]
+    } else {
+        vec![]
+    };
+    let lines = [vec![
         "import json, sys, traceback".to_string(),
         "if sys.platform == 'win32':".to_string(),
         "    import asyncio".to_string(),
@@ -645,6 +684,7 @@ fn build_script(
         "    try:".to_string(),
         format!("        nb = nbformat.read(open({path_repr}, encoding='utf-8'), as_version=4)"),
         format!("        client = nbclient.NotebookClient(nb, timeout={timeout}, kernel_name={kernel_repr}, allow_errors={allow_errors}, startup_timeout={startup_timeout}, iopub_timeout={iopub_timeout}, record_timing={record_timing})"),
+    ], progress_hooks, vec![
         "        result['execution_started'] = True".to_string(),
         "        client.execute()".to_string(),
         "        failures = [(i, o) for i, c in enumerate(nb.cells) for o in c.get('outputs', []) if o.get('output_type') == 'error']".to_string(),
@@ -662,7 +702,8 @@ fn build_script(
         "finally:".to_string(),
         "    with open(report_path, 'w', encoding='utf-8') as f: json.dump(result, f)".to_string(),
         "sys.exit(0 if result['status'] in ('ok', 'ok_with_errors') else (2 if result['status'] == 'missing_dependency' else 1))".to_string(),
-    ];
+    ]]
+    .concat();
     lines.join("\n") + "\n"
 }
 
@@ -672,14 +713,14 @@ mod tests {
 
     #[test]
     fn generated_script_has_finally_persistence() {
-        let script = build_script("nb.ipynb", "report.json", 60, "python3", false, 60, 4, true);
+        let script = build_script("nb.ipynb", "report.json", 60, "python3", false, 60, 4, true, &[], false);
         assert!(script.contains("finally:\n        if nb is not None:"));
         assert!(script.contains("json.dump(result, f)"));
     }
 
     #[test]
     fn no_limit_maps_to_python_none() {
-        let script = build_script("nb.ipynb", "report.json", -1, "python3", false, 60, 4, true);
+        let script = build_script("nb.ipynb", "report.json", -1, "python3", false, 60, 4, true, &[], false);
         assert!(script.contains("timeout=None"));
     }
 
@@ -694,17 +735,42 @@ mod tests {
         }) else {
             return;
         };
-        let script = build_script("nb.ipynb", "report.json", 60, "python3", false, 60, 4, true);
-        let output = Command::new(python)
-            .arg("-c")
-            .arg(format!("compile({script:?}, '<test>', 'exec')"))
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}\n{script}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        // verbose=true here so the progress-hook branch (the newest, riskiest code) is
+        // exercised by the real interpreter, not just the quiet/json-suppressed path.
+        for verbose in [false, true] {
+            let script = build_script("nb.ipynb", "report.json", 60, "python3", false, 60, 4, true, &[2, 4], verbose);
+            let output = Command::new(python)
+                .arg("-c")
+                .arg(format!("compile({script:?}, '<test>', 'exec')"))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "verbose={verbose}: {}\n{script}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn verbose_emits_progress_hooks_with_one_based_original_cell_numbers() {
+        let script = build_script("nb.ipynb", "report.json", 60, "python3", false, 60, 4, true, &[3, 4], true);
+        assert!(script.contains("_nbedit_cells = [4,5]") || script.contains("_nbedit_cells = [4, 5]"));
+        assert!(script.contains("client.on_cell_start = _nbedit_cell_start"));
+        assert!(script.contains("client.on_cell_complete = _nbedit_cell_complete"));
+        // Guarded so an nbclient too old to have these Callable traitlets loses the progress
+        // lines instead of breaking execution.
+        assert!(script.contains("        try:\n            client.on_cell_start"));
+        assert!(script.contains("        except Exception:\n            pass"));
+        // Goes to stderr, not stdout, so it never corrupts a --json caller's stdout parsing.
+        assert!(script.contains("file=sys.stderr"));
+    }
+
+    #[test]
+    fn quiet_or_json_omits_progress_hooks_entirely() {
+        let script = build_script("nb.ipynb", "report.json", 60, "python3", false, 60, 4, true, &[0], false);
+        assert!(!script.contains("on_cell_start"));
+        assert!(!script.contains("_nbedit_cell"));
     }
 
     #[test]
@@ -716,7 +782,7 @@ mod tests {
 
     #[test]
     fn windows_driver_uses_selector_event_loop_policy() {
-        let script = build_script("nb.ipynb", "report.json", 60, "python3", false, 60, 4, true);
+        let script = build_script("nb.ipynb", "report.json", 60, "python3", false, 60, 4, true, &[], false);
         assert!(script.contains("WindowsSelectorEventLoopPolicy"));
         assert!(
             script.find("WindowsSelectorEventLoopPolicy").unwrap()
