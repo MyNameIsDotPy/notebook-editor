@@ -334,6 +334,9 @@ pub fn build_daemon_script(kernel_name: &str, token: &str, startup_timeout: u64)
         format!("KERNEL_NAME = {kernel_repr}"),
         format!("TOKEN = {token_repr}"),
         format!("STARTUP_TIMEOUT = {startup_timeout}"),
+        "# asyncio's default 64 KiB StreamReader limit makes readline() reject large".to_string(),
+        "# execute batches ('Separator is found, but chunk is longer than limit').".to_string(),
+        "REQUEST_LIMIT = 1024 * 1024 * 1024".to_string(),
         String::new(),
         "def announce(payload):".to_string(),
         "    sys.stdout.write(json.dumps(payload) + '\\n')".to_string(),
@@ -422,7 +425,7 @@ pub fn build_daemon_script(kernel_name: &str, token: &str, startup_timeout: u64)
         String::new(),
         "    try:".to_string(),
         "        async with client.async_setup_kernel(cleanup_kc=False):".to_string(),
-        "            server = await asyncio.start_server(handle, host='127.0.0.1', port=0)".to_string(),
+        "            server = await asyncio.start_server(handle, host='127.0.0.1', port=0, limit=REQUEST_LIMIT)".to_string(),
         "            port = server.sockets[0].getsockname()[1]".to_string(),
         "            announce({'status': 'ready', 'port': port, 'pid': os.getpid()})".to_string(),
         "            async with server:".to_string(),
@@ -509,6 +512,12 @@ mod tests {
         let script = build_daemon_script("python3", "tok", 60);
         assert!(script.contains("metadata=cell_req.get('metadata', {})"));
         assert!(script.contains("client.iopub_timeout = req.get('iopub_timeout', 4)"));
+    }
+
+    #[test]
+    fn daemon_script_raises_stream_reader_limit_for_large_requests() {
+        let script = build_daemon_script("python3", "tok", 60);
+        assert!(script.contains("port=0, limit=REQUEST_LIMIT)"));
     }
 
     #[test]
