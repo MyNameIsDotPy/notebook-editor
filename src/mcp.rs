@@ -50,11 +50,26 @@ fn write_message(writer: &mut impl Write, value: &Value) -> Result<()> {
     Ok(())
 }
 
-struct McpServer {
+/// The MCP server's tool dispatcher, usable in-process (e.g. by Workbench) with the same
+/// contract as `nbedit-mcp`: `call_tool` takes `{"name", "arguments"}` and returns the MCP
+/// tool result (`content`, `structuredContent`, `isError`).
+pub struct McpServer {
     root: PathBuf,
 }
 
 impl McpServer {
+    /// Confines every tool to `root`, like `nbedit-mcp --root`.
+    pub fn new(root: &Path) -> Result<Self> {
+        let root = std::fs::canonicalize(root)
+            .with_context(|| format!("Cannot access MCP workspace root '{}'", root.display()))?;
+        Ok(McpServer { root })
+    }
+
+    /// Definitions advertised by `tools/list`.
+    pub fn tool_definitions() -> Vec<Value> {
+        tool_definitions()
+    }
+
     fn handle(&self, request: &Value) -> Option<Value> {
         let id = request.get("id").cloned();
         let method = request.get("method").and_then(Value::as_str);
@@ -94,7 +109,7 @@ impl McpServer {
         })
     }
 
-    fn call_tool(&self, params: &Value) -> Result<Value> {
+    pub fn call_tool(&self, params: &Value) -> Result<Value> {
         let name = required_str(params, "name")?;
         let arguments = params
             .get("arguments")
