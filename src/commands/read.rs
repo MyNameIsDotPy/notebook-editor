@@ -57,7 +57,7 @@ pub fn run(
             if all_lines.is_empty() {
                 println!("<empty cell>");
             } else {
-                let line_indices = selection::resolve(expr, all_lines.len())?;
+                let line_indices = selection::resolve_lines(expr, all_lines.len())?;
                 for li in line_indices {
                     println!("{:>4}  {}", li + 1, all_lines[li]);
                 }

@@ -4,6 +4,11 @@ use std::collections::HashSet;
 
 pub fn run(notebook: &str, json: bool) -> Result<()> {
     let nb = Notebook::from_file(notebook)?;
+    let issues = issues(&nb);
+    report(&nb, issues, json)
+}
+
+pub fn issues(nb: &Notebook) -> Vec<String> {
     let mut issues = Vec::new();
     let mut ids = HashSet::new();
     for (i, cell) in nb.cells.iter().enumerate() {
@@ -20,6 +25,10 @@ pub fn run(notebook: &str, json: bool) -> Result<()> {
             None => issues.push(format!("Cell {} has no ID", i + 1)),
         }
     }
+    issues
+}
+
+pub fn report(nb: &Notebook, issues: Vec<String>, json: bool) -> Result<()> {
     if json {
         println!(
             "{}",

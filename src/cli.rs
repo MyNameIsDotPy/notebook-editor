@@ -109,9 +109,21 @@ pub enum Command {
     Validate {
         notebook: String,
         #[arg(long)]
+        python_syntax: bool,
+        #[arg(long)]
+        python: Option<String>,
+        #[arg(long)]
         json: bool,
     },
 
+    /// Wrap existing Python code without rewriting its body
+    Wrap(Box<WrapArgs>),
+    /// Add indentation to a contiguous Python line range
+    Indent(Box<IndentArgs>),
+    /// Apply a JSON array of operations atomically after validation
+    Apply(Box<ApplyArgs>),
+    /// Check configurable Python compliance rules
+    Lint(Box<LintArgs>),
     /// Repair missing or duplicate IDs and invalid cell metadata
     Repair { notebook: String },
 
@@ -207,45 +219,7 @@ pub enum Command {
     /// --insert-after/--insert-before to add lines without removing any, or
     /// --delete-lines to remove specific lines. --source and --file are mutually
     /// exclusive; omit both with --editor to open the cell in $EDITOR.
-    Edit {
-        /// Path to the notebook file
-        notebook: String,
-
-        /// Index of the cell to edit (1-based)
-        index: usize,
-
-        /// Replace source with inline text
-        #[arg(long, conflicts_with_all = ["file", "editor"])]
-        source: Option<String>,
-
-        /// Replace source with file contents
-        #[arg(long, conflicts_with_all = ["source", "editor"])]
-        file: Option<String>,
-
-        /// Open the cell in $EDITOR
-        #[arg(long, conflicts_with_all = ["source", "file"])]
-        editor: bool,
-
-        /// Change the cell type
-        #[arg(long, value_enum)]
-        r#type: Option<CellType>,
-
-        /// Only replace specific lines within the cell (same syntax as cell selection)
-        #[arg(long, conflicts_with_all = ["insert_after", "insert_before", "delete_lines"])]
-        lines: Option<String>,
-
-        /// Insert new content after this line number (1-based)
-        #[arg(long, conflicts_with_all = ["lines", "insert_before", "delete_lines", "editor"])]
-        insert_after: Option<usize>,
-
-        /// Insert new content before this line number (1-based)
-        #[arg(long, conflicts_with_all = ["lines", "insert_after", "delete_lines", "editor"])]
-        insert_before: Option<usize>,
-
-        /// Delete specific lines within the cell (same syntax as cell selection)
-        #[arg(long, conflicts_with_all = ["lines", "insert_after", "insert_before", "source", "file", "editor"])]
-        delete_lines: Option<String>,
-    },
+    Edit(Box<EditArgs>),
 
     /// Remove one or more cells
     Delete {
@@ -363,77 +337,7 @@ pub enum Command {
     ///
     /// Exits with code 1 for execution failure, code 2 for missing driver
     /// dependencies, code 124 for overall timeout, or code 130 for Ctrl-C.
-    Run {
-        /// Path to the notebook file
-        notebook: String,
-
-        /// Cell selection: index, list (1,3,5), range (2-6), or keywords 'all'/'last'
-        selection: String,
-
-        /// Per-cell execution timeout in seconds (-1 for no limit)
-        #[arg(long, default_value = "-1")]
-        timeout: i64,
-
-        /// Kernel name override (default: from notebook metadata)
-        #[arg(long)]
-        kernel: Option<String>,
-
-        /// Python interpreter that runs notebook cells (need not be registered)
-        #[arg(long)]
-        interpreter: Option<String>,
-
-        /// Python interpreter containing nbclient (legacy alias: --python)
-        #[arg(long = "driver-python", alias = "python")]
-        driver_python: Option<String>,
-
-        /// Continue executing later cells after a cell raises an error
-        #[arg(long)]
-        allow_errors: bool,
-
-        /// Execute preceding code cells as context, but update only selected cells
-        #[arg(long, conflicts_with = "session")]
-        include_prior: bool,
-
-        /// Kernel startup timeout in seconds
-        #[arg(long, default_value = "60")]
-        startup_timeout: u64,
-
-        /// IOPub-channel timeout in seconds
-        #[arg(long, default_value = "4")]
-        iopub_timeout: u64,
-
-        /// Disable nbclient execution timing metadata
-        #[arg(long)]
-        no_record_timing: bool,
-
-        /// Maximum wall-clock time for the entire execution
-        #[arg(long)]
-        overall_timeout: Option<u64>,
-
-        /// Working directory for the kernel (default: notebook directory)
-        #[arg(long)]
-        cwd: Option<String>,
-
-        /// Environment variable passed to the kernel, in KEY=VALUE form
-        #[arg(long = "env", value_name = "KEY=VALUE")]
-        env: Vec<String>,
-
-        /// Resolve and validate the kernel without executing cells
-        #[arg(long)]
-        dry_run: bool,
-
-        /// Emit a machine-readable execution report
-        #[arg(long)]
-        json: bool,
-
-        /// Execute against a persistent kernel session instead of a one-shot kernel
-        #[arg(long)]
-        session: Option<String>,
-
-        /// Create the session if it doesn't exist yet (requires --session)
-        #[arg(long, requires = "session")]
-        create_session: bool,
-    },
+    Run(Box<RunArgs>),
 
     /// Find and replace text (regex) within cell sources
     ///
@@ -592,4 +496,188 @@ impl CellType {
             CellType::Raw => "raw",
         }
     }
+}
+
+#[derive(clap::Args)]
+pub struct WrapArgs {
+    pub notebook: String,
+    pub selection: String,
+    #[arg(long, required = true)]
+    pub try_except: bool,
+    #[arg(long)]
+    pub description: Option<String>,
+    #[arg(long)]
+    pub input: Option<String>,
+    #[arg(long)]
+    pub output: Option<String>,
+    #[arg(long)]
+    pub logger_info: Option<String>,
+    #[arg(long)]
+    pub logger_error: Option<String>,
+    #[arg(long)]
+    pub dry_run: bool,
+    #[arg(long)]
+    pub python: Option<String>,
+}
+
+#[derive(clap::Args)]
+pub struct IndentArgs {
+    pub notebook: String,
+    pub index: usize,
+    #[arg(long)]
+    pub lines: String,
+    #[arg(long, default_value_t = 4)]
+    pub spaces: usize,
+    #[arg(long)]
+    pub dry_run: bool,
+    #[arg(long)]
+    pub python: Option<String>,
+    /// Require valid Python after indentation (partial edits may be incomplete)
+    #[arg(long)]
+    pub python_syntax: bool,
+}
+
+#[derive(clap::Args)]
+pub struct ApplyArgs {
+    pub notebook: String,
+    #[arg(long)]
+    pub operations: String,
+    #[arg(long)]
+    pub dry_run: bool,
+    #[arg(long)]
+    pub python: Option<String>,
+}
+
+#[derive(clap::Args)]
+pub struct LintArgs {
+    pub notebook: String,
+    #[arg(long)]
+    pub rules: String,
+    #[arg(long)]
+    pub python: Option<String>,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Args)]
+pub struct EditArgs {
+    /// Path to the notebook file
+    pub notebook: String,
+
+    /// Index of the cell to edit (1-based)
+    pub index: usize,
+
+    /// Replace source with inline text
+    #[arg(long, conflicts_with_all = ["file", "editor"])]
+    pub source: Option<String>,
+
+    /// Replace source with file contents
+    #[arg(long, conflicts_with_all = ["source", "editor"])]
+    pub file: Option<String>,
+
+    /// Open the cell in $EDITOR
+    #[arg(long, conflicts_with_all = ["source", "file"])]
+    pub editor: bool,
+
+    /// Change the cell type
+    #[arg(long, value_enum)]
+    pub r#type: Option<CellType>,
+
+    /// Only replace specific lines within the cell (same syntax as cell selection)
+    #[arg(long, conflicts_with_all = ["insert_after", "insert_before", "delete_lines"])]
+    pub lines: Option<String>,
+
+    /// Insert new content after the end of this contiguous line range
+    #[arg(long, conflicts_with_all = ["lines", "insert_before", "delete_lines", "editor"])]
+    pub insert_after: Option<String>,
+
+    /// Insert new content before the start of this contiguous line range
+    #[arg(long, conflicts_with_all = ["lines", "insert_after", "delete_lines", "editor"])]
+    pub insert_before: Option<String>,
+
+    /// Delete specific lines within the cell (same syntax as cell selection)
+    #[arg(long, conflicts_with_all = ["lines", "insert_after", "insert_before", "source", "file", "editor"])]
+    pub delete_lines: Option<String>,
+    #[arg(long)]
+    pub dry_run: bool,
+    #[arg(long)]
+    pub python_syntax: bool,
+    #[arg(long)]
+    pub python: Option<String>,
+    /// Restore a notebook backup instead of editing source
+    #[arg(long, conflicts_with_all = ["source", "file", "editor", "type", "lines", "insert_after", "insert_before", "delete_lines"])]
+    pub rollback: Option<String>,
+}
+
+#[derive(clap::Args)]
+pub struct RunArgs {
+    /// Path to the notebook file
+    pub notebook: String,
+
+    /// Cell selection: index, list (1,3,5), range (2-6), or keywords 'all'/'last'
+    pub selection: String,
+
+    /// Per-cell execution timeout in seconds (-1 for no limit)
+    #[arg(long, default_value = "-1")]
+    pub timeout: i64,
+
+    /// Kernel name override (default: from notebook metadata)
+    #[arg(long)]
+    pub kernel: Option<String>,
+
+    /// Python interpreter that runs notebook cells (need not be registered)
+    #[arg(long)]
+    pub interpreter: Option<String>,
+
+    /// Python interpreter containing nbclient (legacy alias: --python)
+    #[arg(long = "driver-python", alias = "python")]
+    pub driver_python: Option<String>,
+
+    /// Continue executing later cells after a cell raises an error
+    #[arg(long)]
+    pub allow_errors: bool,
+
+    /// Execute preceding code cells as context, but update only selected cells
+    #[arg(long, conflicts_with = "session")]
+    pub include_prior: bool,
+
+    /// Kernel startup timeout in seconds
+    #[arg(long, default_value = "60")]
+    pub startup_timeout: u64,
+
+    /// IOPub-channel timeout in seconds
+    #[arg(long, default_value = "4")]
+    pub iopub_timeout: u64,
+
+    /// Disable nbclient execution timing metadata
+    #[arg(long)]
+    pub no_record_timing: bool,
+
+    /// Maximum wall-clock time for the entire execution
+    #[arg(long)]
+    pub overall_timeout: Option<u64>,
+
+    /// Working directory for the kernel (default: notebook directory)
+    #[arg(long)]
+    pub cwd: Option<String>,
+
+    /// Environment variable passed to the kernel, in KEY=VALUE form
+    #[arg(long = "env", value_name = "KEY=VALUE")]
+    pub env: Vec<String>,
+
+    /// Resolve and validate the kernel without executing cells
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Emit a machine-readable execution report
+    #[arg(long)]
+    pub json: bool,
+
+    /// Execute against a persistent kernel session instead of a one-shot kernel
+    #[arg(long)]
+    pub session: Option<String>,
+
+    /// Create the session if it doesn't exist yet (requires --session)
+    #[arg(long, requires = "session")]
+    pub create_session: bool,
 }

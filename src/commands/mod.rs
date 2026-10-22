@@ -105,7 +105,128 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             cli.quiet,
         ),
 
-        Command::Validate { notebook, json } => validate::run(&notebook, json),
+        Command::Validate {
+            notebook,
+            json,
+            python_syntax,
+            python,
+        } => {
+            let nb = crate::notebook::Notebook::from_file(&notebook)?;
+            let mut issues = validate::issues(&nb);
+            if python_syntax {
+                for issue in crate::structural::syntax_issues(&nb, python.as_deref())? {
+                    issues.push(format!(
+                        "Cell {} line {} column {}: {}",
+                        issue["cell"], issue["line"], issue["column"], issue["message"]
+                    ));
+                }
+            }
+            validate::report(&nb, issues, json)
+        }
+        Command::Wrap(args) => {
+            let crate::cli::WrapArgs {
+                notebook,
+                selection,
+                try_except: _,
+                description,
+                input,
+                output,
+                logger_info,
+                logger_error,
+                dry_run,
+                python,
+            } = *args;
+            let nb = crate::notebook::Notebook::from_file(&notebook)?;
+            let operations = crate::selection::resolve(&selection, nb.len())?
+                .into_iter()
+                .map(|i| crate::structural::Operation::Wrap {
+                    cell: i + 1,
+                    description: description.clone(),
+                    input: input.clone(),
+                    output: output.clone(),
+                    logger_info: logger_info.clone(),
+                    logger_error: logger_error.clone(),
+                })
+                .collect::<Vec<_>>();
+            crate::structural::transaction(
+                &notebook,
+                &operations,
+                cli.backup,
+                dry_run,
+                python.as_deref(),
+            )
+        }
+        Command::Indent(args) => {
+            let crate::cli::IndentArgs {
+                notebook,
+                index,
+                lines,
+                spaces,
+                dry_run,
+                python,
+                python_syntax,
+            } = *args;
+            let mut nb = crate::notebook::Notebook::from_file(&notebook)?;
+            crate::structural::apply(
+                &mut nb,
+                &crate::structural::Operation::Indent {
+                    cell: index,
+                    lines,
+                    spaces,
+                },
+                python.as_deref(),
+            )?;
+            if python_syntax {
+                crate::structural::check(&nb, python.as_deref())?;
+            }
+            if dry_run {
+                println!("{}", serde_json::to_string_pretty(&nb)?);
+            } else {
+                nb.save(&notebook, cli.backup)?;
+            }
+            Ok(())
+        }
+        Command::Apply(args) => {
+            let crate::cli::ApplyArgs {
+                notebook,
+                operations,
+                dry_run,
+                python,
+            } = *args;
+            let operations = serde_json::from_str::<Vec<crate::structural::Operation>>(
+                &std::fs::read_to_string(operations)?,
+            )?;
+            crate::structural::transaction(
+                &notebook,
+                &operations,
+                cli.backup,
+                dry_run,
+                python.as_deref(),
+            )
+        }
+        Command::Lint(args) => {
+            let crate::cli::LintArgs {
+                notebook,
+                rules,
+                python,
+                json,
+            } = *args;
+            let issues = crate::structural::lint(&notebook, &rules, python.as_deref())?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"valid":issues.is_empty(),"issues":issues})
+                );
+            } else {
+                for issue in &issues {
+                    println!("{issue}");
+                }
+            }
+            if !issues.is_empty() {
+                anyhow::bail!("Notebook lint failed");
+            }
+            Ok(())
+        }
         Command::Repair { notebook } => validate::repair(&notebook, cli.backup, cli.quiet),
         Command::Bookmark { notebook, action } => match action {
             BookmarkAction::Set { name, index } => {
@@ -146,31 +267,42 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             json,
         } => query::run(&notebook, &pattern, &scope, ignore_case, json),
 
-        Command::Edit {
-            notebook,
-            index,
-            source,
-            file,
-            editor,
-            r#type,
-            lines,
-            insert_after,
-            insert_before,
-            delete_lines,
-        } => edit::run(
-            &notebook,
-            index,
-            source,
-            file,
-            editor,
-            r#type.as_ref().map(|t| t.as_str()),
-            lines.as_deref(),
-            insert_after,
-            insert_before,
-            delete_lines.as_deref(),
-            cli.backup,
-            cli.quiet,
-        ),
+        Command::Edit(args) => {
+            let crate::cli::EditArgs {
+                notebook,
+                index,
+                source,
+                file,
+                editor,
+                r#type,
+                lines,
+                insert_after,
+                insert_before,
+                delete_lines,
+                dry_run,
+                python_syntax,
+                python,
+                rollback,
+            } = *args;
+            edit::run_options(
+                &notebook,
+                index,
+                source,
+                file,
+                editor,
+                r#type.as_ref().map(|t| t.as_str()),
+                lines.as_deref(),
+                insert_after.as_deref(),
+                insert_before.as_deref(),
+                delete_lines.as_deref(),
+                dry_run,
+                python_syntax,
+                python.as_deref(),
+                rollback.as_deref(),
+                cli.backup,
+                cli.quiet,
+            )
+        }
 
         Command::Delete {
             notebook,
@@ -201,47 +333,50 @@ pub fn dispatch(cli: Cli) -> Result<()> {
 
         Command::Info { notebook } => info::run(&notebook),
 
-        Command::Run {
-            notebook,
-            selection,
-            timeout,
-            kernel,
-            interpreter,
-            driver_python,
-            allow_errors,
-            include_prior,
-            startup_timeout,
-            iopub_timeout,
-            no_record_timing,
-            overall_timeout,
-            cwd,
-            env,
-            dry_run,
-            json,
-            session,
-            create_session,
-        } => run::run(
-            &notebook,
-            &selection,
-            timeout,
-            kernel.as_deref(),
-            interpreter.as_deref(),
-            driver_python.as_deref(),
-            allow_errors,
-            include_prior,
-            startup_timeout,
-            iopub_timeout,
-            !no_record_timing,
-            overall_timeout,
-            cwd.as_deref(),
-            &env,
-            dry_run,
-            json,
-            cli.backup,
-            cli.quiet,
-            session.as_deref(),
-            create_session,
-        ),
+        Command::Run(args) => {
+            let crate::cli::RunArgs {
+                notebook,
+                selection,
+                timeout,
+                kernel,
+                interpreter,
+                driver_python,
+                allow_errors,
+                include_prior,
+                startup_timeout,
+                iopub_timeout,
+                no_record_timing,
+                overall_timeout,
+                cwd,
+                env,
+                dry_run,
+                json,
+                session,
+                create_session,
+            } = *args;
+            run::run(
+                &notebook,
+                &selection,
+                timeout,
+                kernel.as_deref(),
+                interpreter.as_deref(),
+                driver_python.as_deref(),
+                allow_errors,
+                include_prior,
+                startup_timeout,
+                iopub_timeout,
+                !no_record_timing,
+                overall_timeout,
+                cwd.as_deref(),
+                &env,
+                dry_run,
+                json,
+                cli.backup,
+                cli.quiet,
+                session.as_deref(),
+                create_session,
+            )
+        }
 
         Command::Replace {
             notebook,

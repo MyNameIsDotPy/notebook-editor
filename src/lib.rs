@@ -5,3 +5,4 @@ pub mod mcp;
 pub mod notebook;
 pub mod output_limit;
 pub mod selection;
+pub mod structural;

@@ -11,8 +11,28 @@ use anyhow::{bail, Result};
 ///   `2-6`       → inclusive range
 ///   `1,3-5,8`   → mix
 pub fn resolve(expr: &str, total: usize) -> Result<Vec<usize>> {
+    resolve_for(expr, total, false)
+}
+
+/// Resolve 1-based lines with diagnostics referring to the cell's line count.
+pub fn resolve_lines(expr: &str, total: usize) -> Result<Vec<usize>> {
+    resolve_for(expr, total, true)
+}
+
+fn resolve_for(expr: &str, total: usize, lines: bool) -> Result<Vec<usize>> {
+    resolve_inner(expr, total, lines)
+}
+
+fn resolve_inner(expr: &str, total: usize, lines: bool) -> Result<Vec<usize>> {
     if total == 0 {
-        bail!("The notebook has no cells");
+        bail!(
+            "{}",
+            if lines {
+                "The cell has no lines"
+            } else {
+                "The notebook has no cells"
+            }
+        );
     }
 
     let expr = expr.trim();
@@ -31,8 +51,8 @@ pub fn resolve(expr: &str, total: usize) -> Result<Vec<usize>> {
         if part.contains('-') {
             // Range: e.g. "2-6"
             let mut iter = part.splitn(2, '-');
-            let start = parse_index(iter.next().unwrap().trim(), total)?;
-            let end = parse_index(iter.next().unwrap().trim(), total)?;
+            let start = parse_index_for(iter.next().unwrap().trim(), total, lines)?;
+            let end = parse_index_for(iter.next().unwrap().trim(), total, lines)?;
             if start > end {
                 bail!(
                     "Range start {s} is greater than end {e}",
@@ -42,7 +62,7 @@ pub fn resolve(expr: &str, total: usize) -> Result<Vec<usize>> {
             }
             indices.extend(start..=end);
         } else {
-            indices.push(parse_index(part, total)?);
+            indices.push(parse_index_for(part, total, lines)?);
         }
     }
 
@@ -55,10 +75,21 @@ pub fn resolve(expr: &str, total: usize) -> Result<Vec<usize>> {
 
 /// Parse a 1-based user index into a 0-based internal index.
 fn parse_index(s: &str, total: usize) -> Result<usize> {
+    parse_index_for(s, total, false)
+}
+
+fn parse_index_for(s: &str, total: usize, lines: bool) -> Result<usize> {
+    let unit = if lines { "line" } else { "cell" };
+    if s.eq_ignore_ascii_case("last") && total > 0 {
+        return Ok(total - 1);
+    }
     let n: usize = s
         .parse()
-        .map_err(|_| anyhow::anyhow!("'{s}' is not a valid cell index"))?;
+        .map_err(|_| anyhow::anyhow!("'{s}' is not a valid {unit} index"))?;
     if n == 0 || n > total {
+        if lines {
+            bail!("Line index {n} is out of range (cell has {total} lines)");
+        }
         bail!("Cell index {n} is out of range (notebook has {total} cells)");
     }
     Ok(n - 1)

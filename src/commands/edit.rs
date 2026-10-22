@@ -1,6 +1,8 @@
 use super::create::resolve_source;
-use crate::notebook::Notebook;
-use crate::selection;
+use crate::{
+    notebook::Notebook,
+    structural::{self, Operation},
+};
 use anyhow::{bail, Result};
 
 #[allow(clippy::too_many_arguments)]
@@ -18,154 +20,127 @@ pub fn run(
     backup: bool,
     quiet: bool,
 ) -> Result<()> {
-    let mut nb = Notebook::from_file(notebook)?;
+    run_options(
+        notebook,
+        index,
+        source,
+        file,
+        use_editor,
+        new_type,
+        lines_expr,
+        insert_after.map(|n| n.to_string()).as_deref(),
+        insert_before.map(|n| n.to_string()).as_deref(),
+        delete_lines,
+        false,
+        false,
+        None,
+        None,
+        backup,
+        quiet,
+    )
+}
 
-    if index == 0 || index > nb.len() {
-        bail!(
-            "Cell index {index} is out of range (notebook has {} cells)",
-            nb.len()
-        );
-    }
-    let idx = index - 1;
-
-    if let Some(expr) = delete_lines {
-        // ── Delete specific lines within the cell ──────────────────────────
-        let current = nb.cells[idx].source_str();
-        let all_lines: Vec<&str> = current.lines().collect();
-        if all_lines.is_empty() {
-            bail!("Cell {index} is empty, cannot delete lines");
-        }
-        let to_delete = selection::resolve(expr, all_lines.len())?;
-        let new_src: Vec<&str> = all_lines
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !to_delete.contains(i))
-            .map(|(_, l)| *l)
-            .collect();
-        let mut joined = new_src.join("\n");
-        if current.ends_with('\n') && !joined.is_empty() {
-            joined.push('\n');
-        }
-        nb.cells[idx].set_source(joined);
-
-        if !quiet {
-            eprintln!("Deleted {} line(s) from cell {index}", to_delete.len());
-        }
-    } else if let Some(after) = insert_after {
-        // ── Insert lines after a given line number ─────────────────────────
-        let new_content = resolve_source(source, file)?;
-        let current = nb.cells[idx].source_str();
-        let mut all_lines: Vec<String> = current.lines().map(|l| l.to_string()).collect();
-
-        if after == 0 || after > all_lines.len() {
-            bail!(
-                "--insert-after {after} is out of range (cell {index} has {} lines)",
-                all_lines.len()
-            );
-        }
-
-        let insert_lines: Vec<String> = new_content.lines().map(|l| l.to_string()).collect();
-        for (offset, line) in insert_lines.into_iter().enumerate() {
-            all_lines.insert(after + offset, line);
-        }
-
-        let mut new_src = all_lines.join("\n");
-        if current.ends_with('\n') {
-            new_src.push('\n');
-        }
-        nb.cells[idx].set_source(new_src);
-
-        if !quiet {
-            eprintln!("Inserted line(s) after line {after} in cell {index}");
-        }
-    } else if let Some(before) = insert_before {
-        // ── Insert lines before a given line number ────────────────────────
-        let new_content = resolve_source(source, file)?;
-        let current = nb.cells[idx].source_str();
-        let mut all_lines: Vec<String> = current.lines().map(|l| l.to_string()).collect();
-
-        if before == 0 || before > all_lines.len() {
-            bail!(
-                "--insert-before {before} is out of range (cell {index} has {} lines)",
-                all_lines.len()
-            );
-        }
-
-        let insert_lines: Vec<String> = new_content.lines().map(|l| l.to_string()).collect();
-        for (offset, line) in insert_lines.into_iter().enumerate() {
-            all_lines.insert(before - 1 + offset, line);
-        }
-
-        let mut new_src = all_lines.join("\n");
-        if current.ends_with('\n') {
-            new_src.push('\n');
-        }
-        nb.cells[idx].set_source(new_src);
-
-        if !quiet {
-            eprintln!("Inserted line(s) before line {before} in cell {index}");
-        }
-    } else if let Some(expr) = lines_expr {
-        // ── Replace specific lines ─────────────────────────────────────────
-        let new_content = resolve_source(source, file)?;
-        let current = nb.cells[idx].source_str();
-        let mut all_lines: Vec<String> = current.lines().map(|l| l.to_string()).collect();
-
-        if all_lines.is_empty() {
-            bail!("Cell {index} is empty, cannot target lines");
-        }
-
-        let line_indices = selection::resolve(expr, all_lines.len())?;
-        let replacement_lines: Vec<&str> = new_content.lines().collect();
-
-        let first = line_indices[0];
-        let last = *line_indices.last().unwrap();
-        all_lines.splice(
-            first..=last,
-            replacement_lines.iter().map(|s| s.to_string()),
-        );
-
-        let mut new_src = all_lines.join("\n");
-        if current.ends_with('\n') {
-            new_src.push('\n');
-        }
-        nb.cells[idx].set_source(new_src);
-
-        if !quiet {
-            eprintln!("Cell {index} lines updated");
-        }
+#[allow(clippy::too_many_arguments)]
+pub fn run_options(
+    notebook: &str,
+    index: usize,
+    source: Option<String>,
+    file: Option<String>,
+    use_editor: bool,
+    new_type: Option<&str>,
+    lines_expr: Option<&str>,
+    insert_after: Option<&str>,
+    insert_before: Option<&str>,
+    delete_lines: Option<&str>,
+    dry_run: bool,
+    python_syntax: bool,
+    python: Option<&str>,
+    rollback: Option<&str>,
+    backup: bool,
+    quiet: bool,
+) -> Result<()> {
+    let mut nb = if let Some(path) = rollback {
+        Notebook::from_file(path)?
     } else {
-        // ── Full-cell replace ──────────────────────────────────────────────
-        let src: Option<String> = if use_editor {
-            Some(open_in_editor(&nb.cells[idx].source_str())?)
-        } else if source.is_some() || file.is_some() {
+        Notebook::from_file(notebook)?
+    };
+    if rollback.is_none() {
+        if index == 0 || index > nb.len() {
+            bail!(
+                "Cell index {index} is out of range (notebook has {} cells)",
+                nb.len()
+            );
+        }
+        let content = if use_editor {
+            Some(open_in_editor(&nb.cells[index - 1].source_str())?)
+        } else if source.is_some()
+            || file.is_some()
+            || insert_before.is_some()
+            || insert_after.is_some()
+            || lines_expr.is_some()
+        {
             Some(resolve_source(source, file)?)
         } else {
             None
         };
-
-        if let Some(s) = src {
-            nb.cells[idx].set_source(s);
-        }
-
-        if !quiet {
-            eprintln!("Cell {index} updated");
-        }
-    }
-
-    if let Some(t) = new_type {
-        nb.cells[idx].cell_type = t.to_string();
-        if t == "code" {
-            if nb.cells[idx].execution_count.is_none() {
-                nb.cells[idx].execution_count = Some(serde_json::Value::Null);
-            }
+        let operation = if let Some(lines) = delete_lines {
+            Some(Operation::Delete {
+                cell: index,
+                lines: lines.into(),
+            })
+        } else if let Some(lines) = insert_before {
+            Some(Operation::InsertBefore {
+                cell: index,
+                lines: lines.into(),
+                source: content.unwrap(),
+            })
+        } else if let Some(lines) = insert_after {
+            Some(Operation::InsertAfter {
+                cell: index,
+                lines: lines.into(),
+                source: content.unwrap(),
+            })
         } else {
-            nb.cells[idx].execution_count = None;
-            nb.cells[idx].outputs.clear();
+            content.map(|source| Operation::Replace {
+                cell: index,
+                lines: lines_expr.map(str::to_owned),
+                source,
+            })
+        };
+        if let Some(op) = operation {
+            structural::apply(&mut nb, &op, python)?;
+        }
+        if let Some(t) = new_type {
+            let cell = &mut nb.cells[index - 1];
+            cell.cell_type = t.into();
+            if t == "code" {
+                if cell.execution_count.is_none() {
+                    cell.execution_count = Some(serde_json::Value::Null);
+                }
+            } else {
+                cell.execution_count = None;
+                cell.outputs.clear();
+            }
         }
     }
-
-    nb.save(notebook, backup)?;
+    if python_syntax {
+        structural::check(&nb, python)?;
+    }
+    if dry_run {
+        println!("{}", serde_json::to_string_pretty(&nb)?);
+    } else {
+        nb.save(notebook, backup)?;
+    }
+    if !quiet {
+        eprintln!(
+            "{}",
+            if dry_run {
+                "Preview only; notebook unchanged"
+            } else {
+                "Notebook updated"
+            }
+        );
+    }
     Ok(())
 }
 

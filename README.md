@@ -676,3 +676,76 @@ The skill documents the CLI, automatic kernel and driver resolution, execution c
 ## License
 
 MIT
+## Structural Python editing
+
+These commands preserve cell IDs, outputs, metadata, attachments, and unknown
+notebook fields. They edit source in memory and save through the atomic notebook
+writer. Python 3 is required for tokenization, syntax checks, and linting; use
+`--python PATH` to override the interpreter found on PATH. Notebook code is
+compiled, never executed. IPython magics and top-level `await` are rejected by
+the strict Python compiler.
+
+```sh
+nbedit wrap analysis.ipynb 7,9,11 --try-except --description "Process data" --input "Dataset" --output "Results" --logger-info "Starting" --logger-error "Processing failed" --backup --dry-run
+nbedit validate analysis.ipynb --python-syntax --json
+nbedit indent analysis.ipynb 7 --lines 1-last --spaces 4 --dry-run
+nbedit edit analysis.ipynb 7 --insert-before 3-8 --file header.py --backup --dry-run
+nbedit edit analysis.ipynb 7 --insert-after 3-8 --file footer.py --python-syntax
+nbedit edit analysis.ipynb 7 --rollback analysis.ipynb.bak --dry-run
+```
+
+`wrap` accepts a cell selection and validates the entire resulting notebook
+before saving. Descripción/Entrada/Salida are comment headers when the respective
+options are supplied. Logging options are literal messages, safely quoted;
+`logger` must already exist when the cell is executed. The exception handler
+logs with `exc_info=True` and re-raises. Token-based indentation leaves multiline
+string contents and blank lines unchanged. Wrapping code with a module docstring
+changes its module-docstring status; code requiring module-level placement, such
+as `from __future__`, fails validation instead of being saved.
+
+`indent` adds spaces to selected lines, preserving multiline strings. It permits
+an incomplete intermediate edit; add `--python-syntax` to require valid Python.
+For insertions, a contiguous range means before its first line or after its last
+line. `edit --lines` retains its existing first-to-last replacement behavior.
+`edit --dry-run` prints the resulting notebook without writing or creating a
+backup. `--rollback` restores the whole notebook from the supplied backup (the
+positional cell number is ignored); add `--python-syntax` to validate the restore.
+
+Use `apply` for multiple edits that must succeed together:
+
+```sh
+nbedit apply analysis.ipynb --operations changes.json --backup --dry-run
+```
+
+`changes.json` contains an array evaluated in order against the evolving source:
+
+```json
+[
+  {"op":"replace","cell":7,"lines":"1","source":"try:\n"},
+  {"op":"indent","cell":7,"lines":"2-last","spaces":4},
+  {"op":"insert-after","cell":7,"lines":"last","source":"except Exception as error:\n    logger.error(str(error), exc_info=True)\n    raise\n"}
+]
+```
+
+Supported operations: `wrap`, `indent`, `replace`, `insert-before`, `insert-after`,
+and `delete`. `replace` with omitted `lines` replaces the entire cell. Only the
+final notebook must pass structural and Python syntax validation; failure leaves
+the original and its backup untouched. A dry run validates and prints the result.
+
+```sh
+nbedit lint analysis.ipynb --rules rules.yaml --json
+```
+
+```yaml
+required: [description, input, output, try, logger.info, except, logger.error, raise]
+forbidden_patterns:
+  - 'print\('
+  - 'except\s*:'
+```
+
+Required statements and logger calls are checked through Python's AST; comments
+and string contents cannot impersonate executable statements. Header rules check
+comments for the Spanish labels. Forbidden regex patterns inspect individual
+source lines, including comments and strings. Any finding produces a nonzero
+exit status. These new operations are CLI/library features; dedicated MCP tools
+are not yet exposed.

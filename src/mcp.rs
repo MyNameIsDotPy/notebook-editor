@@ -197,7 +197,7 @@ impl McpServer {
                         let source = cell.source_str();
                         let all_lines: Vec<&str> = source.lines().collect();
                         if all_lines.is_empty() { json!([]) } else {
-                            let selected = selection::resolve(expression, all_lines.len())?;
+                            let selected = selection::resolve_lines(expression, all_lines.len())?;
                             json!(selected.into_iter().map(|line| json!({"line": line + 1, "text": all_lines[line]})).collect::<Vec<_>>())
                         }
                     } else { json!(cell.source_str()) }
