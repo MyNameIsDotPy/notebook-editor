@@ -682,8 +682,19 @@ These commands preserve cell IDs, outputs, metadata, attachments, and unknown
 notebook fields. They edit source in memory and save through the atomic notebook
 writer. Python 3 is required for tokenization, syntax checks, and linting; use
 `--python PATH` to override the interpreter found on PATH. Notebook code is
-compiled, never executed. IPython magics and top-level `await` are rejected by
-the strict Python compiler.
+compiled, never executed. For syntax checking, explicit IPython line magics
+such as `%run` and shell commands such as `!pip` are temporarily replaced with
+`pass`; their original source is never changed. Continued commands are masked
+as a unit, and Python diagnostics retain their cell and line numbers. Multiline
+strings and modulo expressions are not treated as magics. Magic arguments are
+opaque: validation does not check their options, referenced files, or runtime
+behavior. A `%%` cell magic makes the remaining body opaque as well, so Python
+syntax errors inside that body are not checked. Wrapping or reindenting a cell
+magic is rejected because moving it inside a Python block changes its meaning.
+Other IPython forms, such as `files = !ls`, object help (`value?`), and top-level
+`await`, remain unsupported by this syntax validator. No IPython installation is
+required. Validation still checks every other Python statement in the notebook,
+including cells outside a `wrap` selection.
 
 ```sh
 nbedit wrap analysis.ipynb 7,9,11 --try-except --description "Process data" --input "Dataset" --output "Results" --logger-info "Starting" --logger-error "Processing failed" --backup --dry-run

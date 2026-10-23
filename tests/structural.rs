@@ -242,3 +242,147 @@ fn cli_edit_line_range_is_independent_of_notebook_cell_count() {
     assert_eq!(std::fs::read(&path).unwrap(), before);
     assert!(!dir.path().join("n.ipynb.bak").exists());
 }
+
+#[test]
+fn ipython_commands_are_opaque_but_python_errors_keep_their_line_numbers() {
+    for source in [
+        "%run c://Allianz/ADP-local/nbk_generico/nbk_generico.ipynb\nx = 1\n",
+        "%time print('hello')\nx = 1\n",
+        "!echo unmatched ' shell argument\nx = 1\n",
+        "%%bash\necho 'not Python'\nif [ -f x ]; then\nexit 0\nfi\n",
+        "%run \\\n  missing.ipynb\nx = 1\n",
+    ] {
+        let nb = notebook(source);
+        assert!(
+            structural::syntax_issues(&nb, None).unwrap().is_empty(),
+            "{source}"
+        );
+        assert_eq!(nb.cells[0].source_str(), source);
+    }
+    let nb = notebook("%run missing.ipynb\ntry:\nprint('bad indentation')\n");
+    let issues = structural::syntax_issues(&nb, None).unwrap();
+    assert_eq!(issues[0]["line"], 3);
+    assert_eq!(issues[0]["cell"], 1);
+}
+
+#[test]
+fn ipython_masking_does_not_hide_strings_or_python_continuations() {
+    for source in [
+        "s = '''first\n%run not_a_magic\n!not_shell\nlast'''\nx = (10\n % 3)\n",
+        "x = 10 \\\n % 3\n",
+    ] {
+        assert!(structural::syntax_issues(&notebook(source), None)
+            .unwrap()
+            .is_empty());
+    }
+    // A modulo expression inside parentheses must not be masked into valid code.
+    let issues =
+        structural::syntax_issues(&notebook("x = (10\n % invalid syntax)\n"), None).unwrap();
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0]["cell"], 1);
+    let issues =
+        structural::syntax_issues(&notebook("s = '''first\n%run fake\n'''\ntry:\n"), None).unwrap();
+    assert!(!issues.is_empty());
+}
+
+#[test]
+fn wrap_cli_accepts_unmodified_magic_cell_and_validates_all_python_cells() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("n.ipynb");
+    let mut nb = notebook("x = 1\n");
+    for i in 2..=11 {
+        let mut cell = Cell::new("code");
+        cell.id = Some(format!("cell-{i}"));
+        cell.set_source(if i == 2 {
+            "%run c://Allianz/ADP-local/nbk_generico/nbk_generico.ipynb\n".into()
+        } else {
+            format!("x = {i}\n")
+        });
+        nb.cells.push(cell);
+    }
+    nb.save(path.to_str().unwrap(), false).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    for selection in ["7", "7,9,11"] {
+        let result = std::process::Command::new(env!("CARGO_BIN_EXE_nbedit"))
+            .args([
+                "wrap",
+                path.to_str().unwrap(),
+                selection,
+                "--try-except",
+                "--backup",
+                "--dry-run",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let preview: Notebook = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(
+            serde_json::to_value(&preview.cells[1]).unwrap(),
+            serde_json::to_value(&nb.cells[1]).unwrap()
+        );
+        assert!(preview.cells[6].source_str().starts_with("try:\n"));
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(!dir.path().join("n.ipynb.bak").exists());
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_nbedit"))
+        .args([
+            "validate",
+            path.to_str().unwrap(),
+            "--python-syntax",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    // Unselected Python errors still prevent persistence.
+    nb.cells[2].set_source("try:\n".into());
+    nb.save(path.to_str().unwrap(), false).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_nbedit"))
+        .args([
+            "wrap",
+            path.to_str().unwrap(),
+            "7,9,11",
+            "--try-except",
+            "--backup",
+        ])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(!dir.path().join("n.ipynb.bak").exists());
+}
+
+#[test]
+fn wrapping_line_magic_preserves_source_and_cell_magic_is_rejected() {
+    let operation = Operation::Wrap {
+        cell: 1,
+        description: None,
+        input: None,
+        output: None,
+        logger_info: None,
+        logger_error: None,
+    };
+    let mut nb = notebook("%run c://folder/source.ipynb\ns = '''a\n%literal\nb'''\n");
+    structural::apply(&mut nb, &operation, None).unwrap();
+    assert!(nb.cells[0]
+        .source_str()
+        .contains("    %run c://folder/source.ipynb\n"));
+    assert!(nb.cells[0].source_str().contains("'''a\n%literal\nb'''"));
+    assert!(structural::syntax_issues(&nb, None).unwrap().is_empty());
+    let mut nb = notebook("%%bash\necho hello\n");
+    let before = nb.cells[0].source_str();
+    assert!(structural::apply(&mut nb, &operation, None)
+        .unwrap_err()
+        .to_string()
+        .contains("cell magic"));
+    assert_eq!(nb.cells[0].source_str(), before);
+}
