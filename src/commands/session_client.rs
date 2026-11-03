@@ -14,7 +14,7 @@ use std::hash::{BuildHasher, Hasher};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug)]
 pub struct OverallTimeout;
@@ -140,6 +140,18 @@ pub fn save(dir: &Path, record: &SessionRecord) -> Result<()> {
 }
 
 pub fn remove(dir: &Path, id: &str) -> Result<()> {
+    // Registry IDs are generated hex strings; never interpret supplied path components.
+    if !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("Invalid session registry ID");
+    }
+    let spec = dir
+        .join("kernels")
+        .join(format!("nbedit-session-{id}"))
+        .join("kernel.json");
+    let _ = std::fs::remove_file(&spec);
+    if let Some(parent) = spec.parent() {
+        let _ = std::fs::remove_dir(parent);
+    }
     let path = record_path(dir, id);
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
@@ -185,6 +197,8 @@ pub struct CellRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct CellResult {
+    #[serde(default)]
+    pub state: String,
     pub id: String,
     pub execution_count: Value,
     #[serde(default)]
@@ -195,6 +209,8 @@ pub struct CellResult {
 
 #[derive(Debug, Deserialize)]
 pub struct ExecuteResponse {
+    #[serde(default)]
+    pub execution_id: Option<String>,
     pub status: String,
     #[serde(default)]
     pub results: Vec<CellResult>,
@@ -213,59 +229,96 @@ pub fn execute(
     overall_timeout: Option<u64>,
     iopub_timeout: u64,
 ) -> Result<ExecuteResponse> {
-    let payload = serde_json::json!({
-        "cmd": "execute",
-        "cells": cells,
-        "allow_errors": allow_errors,
-        "timeout": timeout,
-        "record_timing": record_timing,
-        "iopub_timeout": iopub_timeout,
-    });
-    let response = match overall_timeout {
-        Some(seconds) => request_with_deadline(
-            record,
-            payload,
-            Instant::now() + Duration::from_secs(seconds),
-        )?,
-        None => request_with_read_timeout(record, payload, None)?,
-    };
-    serde_json::from_value(response).context("Malformed response from session daemon")
+    execute_observed(
+        record,
+        cells,
+        allow_errors,
+        timeout,
+        record_timing,
+        overall_timeout,
+        iopub_timeout,
+        |_| {},
+    )
 }
 
-fn request_with_deadline(
+#[allow(clippy::too_many_arguments)]
+pub fn execute_observed(
     record: &SessionRecord,
-    payload: Value,
-    deadline: Instant,
-) -> Result<Value> {
-    let remaining = deadline
-        .checked_duration_since(Instant::now())
-        .filter(|duration| !duration.is_zero())
-        .ok_or(OverallTimeout)?;
-    let addr: SocketAddr = format!("127.0.0.1:{}", record.port)
-        .parse()
-        .context("Invalid session address")?;
-    let mut stream = TcpStream::connect_timeout(&addr, remaining).with_context(|| {
-        format!(
-            "Cannot connect to session '{}' on port {} (is it still running? try 'nbedit session list')",
-            record.name, record.port
-        )
-    })?;
-    let remaining = deadline
-        .checked_duration_since(Instant::now())
-        .filter(|duration| !duration.is_zero())
-        .ok_or(OverallTimeout)?;
-    stream.set_read_timeout(Some(remaining))?;
-    stream.set_write_timeout(Some(remaining))?;
-    send_and_read(record, &mut stream, payload).map_err(|error| {
-        if error
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|error| error.kind() == std::io::ErrorKind::TimedOut)
-        {
-            OverallTimeout.into()
-        } else {
-            error
+    cells: &[CellRequest],
+    allow_errors: bool,
+    timeout: i64,
+    record_timing: bool,
+    overall_timeout: Option<u64>,
+    iopub_timeout: u64,
+    mut observe: impl FnMut(&Value),
+) -> Result<ExecuteResponse> {
+    if overall_timeout == Some(0) {
+        return Err(OverallTimeout.into());
+    }
+    crate::commands::run::prepare_interrupt()?;
+    let response = control(
+        record,
+        serde_json::json!({
+            "cmd": "submit", "cells": cells, "allow_errors": allow_errors,
+            "timeout": timeout, "record_timing": record_timing,
+            "iopub_timeout": iopub_timeout, "overall_timeout": overall_timeout,
+        }),
+    )?;
+    let id = response
+        .get("execution_id")
+        .and_then(Value::as_str)
+        .context(
+            "Daemon did not return an execution ID; restart sessions created by older versions",
+        )?;
+    let mut after = 0;
+    let mut cancelled = false;
+    loop {
+        if !cancelled && crate::commands::run::interrupted() {
+            cancelled = true;
+            control(
+                record,
+                serde_json::json!({"cmd": "cancel", "execution_id": id}),
+            )?;
         }
-    })
+        let result = control(
+            record,
+            serde_json::json!({"cmd": "result", "execution_id": id, "after": after}),
+        )
+        .with_context(|| {
+            format!(
+                "Execution {id} lost its connection; retrieve results from session {}",
+                record.name
+            )
+        })?;
+        if let Some(events) = result.get("events").and_then(Value::as_array) {
+            for event in events {
+                observe(event);
+            }
+        }
+        after = result
+            .get("sequence")
+            .and_then(Value::as_u64)
+            .unwrap_or(after);
+        if result.get("state").and_then(Value::as_str) == Some("finished") {
+            return serde_json::from_value(result).context("Malformed execution result");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Independent control connections remain available while execution is running.
+pub fn control(record: &SessionRecord, payload: Value) -> Result<Value> {
+    let response = request(record, payload, Duration::from_secs(15))?;
+    if response.get("status").and_then(Value::as_str) == Some("error") {
+        bail!(
+            "{}",
+            response
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Session request failed")
+        );
+    }
+    Ok(response)
 }
 
 fn request(record: &SessionRecord, payload: Value, timeout: Duration) -> Result<Value> {
@@ -327,115 +380,7 @@ fn send_and_read(
 pub fn build_daemon_script(kernel_name: &str, token: &str, startup_timeout: u64) -> String {
     let kernel_repr = serde_json::to_string(kernel_name).expect("string serialization cannot fail");
     let token_repr = serde_json::to_string(token).expect("string serialization cannot fail");
-    let lines = vec![
-        "import asyncio, json, os, sys".to_string(),
-        "if sys.platform == 'win32':".to_string(),
-        "    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())".to_string(),
-        format!("KERNEL_NAME = {kernel_repr}"),
-        format!("TOKEN = {token_repr}"),
-        format!("STARTUP_TIMEOUT = {startup_timeout}"),
-        "# asyncio's default 64 KiB StreamReader limit makes readline() reject large".to_string(),
-        "# execute batches ('Separator is found, but chunk is longer than limit').".to_string(),
-        "REQUEST_LIMIT = 1024 * 1024 * 1024".to_string(),
-        String::new(),
-        "def announce(payload):".to_string(),
-        "    sys.stdout.write(json.dumps(payload) + '\\n')".to_string(),
-        "    sys.stdout.flush()".to_string(),
-        String::new(),
-        "def cell_payload(cell_req, cell):".to_string(),
-        "    return {".to_string(),
-        "        'id': cell_req.get('id'),".to_string(),
-        "        'execution_count': cell.get('execution_count'),".to_string(),
-        "        'outputs': cell.get('outputs', []),".to_string(),
-        "        'metadata': cell.get('metadata', {}),".to_string(),
-        "    }".to_string(),
-        String::new(),
-        "async def respond(writer, payload):".to_string(),
-        "    writer.write((json.dumps(payload) + '\\n').encode())".to_string(),
-        "    await writer.drain()".to_string(),
-        String::new(),
-        "async def main():".to_string(),
-        "    try:".to_string(),
-        "        import nbformat, nbclient".to_string(),
-        "    except ImportError as e:".to_string(),
-        "        announce({'status': 'error', 'message': f'missing_dependency: {e}'})".to_string(),
-        "        return".to_string(),
-        "    nb = nbformat.v4.new_notebook()".to_string(),
-        "    client = nbclient.NotebookClient(nb, kernel_name=KERNEL_NAME, startup_timeout=STARTUP_TIMEOUT)".to_string(),
-        "    stop_event = asyncio.Event()".to_string(),
-        String::new(),
-        "    async def handle(reader, writer):".to_string(),
-        "        try:".to_string(),
-        "            line = await reader.readline()".to_string(),
-        "            if not line:".to_string(),
-        "                return".to_string(),
-        "            req = json.loads(line)".to_string(),
-        "            if req.get('token') != TOKEN:".to_string(),
-        "                await respond(writer, {'status': 'error', 'message': 'unauthorized'})".to_string(),
-        "                return".to_string(),
-        "            cmd = req.get('cmd')".to_string(),
-        "            if cmd == 'ping':".to_string(),
-        "                await respond(writer, {'status': 'ok'})".to_string(),
-        "            elif cmd == 'shutdown':".to_string(),
-        "                await respond(writer, {'status': 'ok'})".to_string(),
-        "                await client.km.shutdown_kernel()".to_string(),
-        "                stop_event.set()".to_string(),
-        "            elif cmd == 'execute':".to_string(),
-        "                client.allow_errors = bool(req.get('allow_errors', False))".to_string(),
-        "                client.record_timing = bool(req.get('record_timing', True))".to_string(),
-        "                client.timeout = req.get('timeout', -1)".to_string(),
-        "                client.iopub_timeout = req.get('iopub_timeout', 4)".to_string(),
-        "                results = []".to_string(),
-        "                status = 'ok'".to_string(),
-        "                failed_id = None".to_string(),
-        "                message = None".to_string(),
-        "                for cell_req in req.get('cells', []):".to_string(),
-        "                    cell = nbformat.v4.new_code_cell(cell_req['source'], metadata=cell_req.get('metadata', {}))".to_string(),
-        "                    nb.cells.append(cell)".to_string(),
-        "                    index = len(nb.cells) - 1".to_string(),
-        "                    try:".to_string(),
-        "                        await client.async_execute_cell(cell, index, execution_count=client.code_cells_executed + 1)".to_string(),
-        "                    except BaseException as e:".to_string(),
-        "                        name = type(e).__name__".to_string(),
-        "                        status = 'cell_timeout' if 'Timeout' in name else ('cell_error' if name == 'CellExecutionError' else 'kernel_error')".to_string(),
-        "                        message = f'{name}: {e}'".to_string(),
-        "                        failed_id = cell_req.get('id')".to_string(),
-        "                        results.append(cell_payload(cell_req, cell))".to_string(),
-        "                        break".to_string(),
-        "                    results.append(cell_payload(cell_req, cell))".to_string(),
-        "                if status == 'ok':".to_string(),
-        "                    for entry in results:".to_string(),
-        "                        if any(o.get('output_type') == 'error' for o in entry['outputs']):".to_string(),
-        "                            status = 'ok_with_errors'".to_string(),
-        "                            failed_id = entry['id']".to_string(),
-        "                            break".to_string(),
-        "                await respond(writer, {'status': status, 'results': results, 'failed_id': failed_id, 'message': message})".to_string(),
-        "            else:".to_string(),
-        "                await respond(writer, {'status': 'error', 'message': f\"unknown command '{cmd}'\"})".to_string(),
-        "        except BaseException as e:".to_string(),
-        "            try:".to_string(),
-        "                await respond(writer, {'status': 'error', 'message': f'{type(e).__name__}: {e}'})".to_string(),
-        "            except Exception:".to_string(),
-        "                pass".to_string(),
-        "        finally:".to_string(),
-        "            try:".to_string(),
-        "                writer.close()".to_string(),
-        "            except Exception:".to_string(),
-        "                pass".to_string(),
-        String::new(),
-        "    try:".to_string(),
-        "        async with client.async_setup_kernel(cleanup_kc=False):".to_string(),
-        "            server = await asyncio.start_server(handle, host='127.0.0.1', port=0, limit=REQUEST_LIMIT)".to_string(),
-        "            port = server.sockets[0].getsockname()[1]".to_string(),
-        "            announce({'status': 'ready', 'port': port, 'pid': os.getpid()})".to_string(),
-        "            async with server:".to_string(),
-        "                await stop_event.wait()".to_string(),
-        "    except BaseException as e:".to_string(),
-        "        announce({'status': 'error', 'message': f'{type(e).__name__}: {e}'})".to_string(),
-        String::new(),
-        "asyncio.run(main())".to_string(),
-    ];
-    lines.join("\n") + "\n"
+    format!("KERNEL_NAME = {kernel_repr}\nTOKEN = {token_repr}\nSTARTUP_TIMEOUT = {startup_timeout}\n{}", include_str!("session_daemon.py"))
 }
 
 #[cfg(test)]
@@ -510,8 +455,8 @@ mod tests {
     #[test]
     fn daemon_script_preserves_metadata_and_honors_iopub_timeout() {
         let script = build_daemon_script("python3", "tok", 60);
-        assert!(script.contains("metadata=cell_req.get('metadata', {})"));
-        assert!(script.contains("client.iopub_timeout = req.get('iopub_timeout', 4)"));
+        assert!(script.contains("metadata=cell_req.get(\"metadata\", {})"));
+        assert!(script.contains("client.iopub_timeout = req.get(\"iopub_timeout\", 4)"));
     }
 
     #[test]

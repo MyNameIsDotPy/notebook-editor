@@ -403,7 +403,7 @@ pub enum Command {
     /// until explicitly stopped.
     Session {
         #[command(subcommand)]
-        action: SessionAction,
+        action: Box<SessionAction>,
     },
 }
 
@@ -424,6 +424,27 @@ pub enum BookmarkAction {
 
 #[derive(Subcommand)]
 pub enum SessionAction {
+    /// Inspect kernel health, queue, and execution history
+    Status { name: String },
+    /// Interrupt the active execution
+    Interrupt { name: String },
+    /// Restart an idle kernel and clear its state
+    Restart { name: String },
+    /// Retrieve an execution result and events
+    Result {
+        name: String,
+        execution_id: String,
+        #[arg(long, default_value = "0")]
+        after: u64,
+    },
+    /// Cancel an active or queued execution
+    Cancel { name: String, execution_id: String },
+    /// Configure optional idle expiry (omit --idle-timeout to disable)
+    Configure {
+        name: String,
+        #[arg(long)]
+        idle_timeout: Option<u64>,
+    },
     /// Start a persistent kernel and register it as a session
     Start {
         /// Session name used to reference it later; a random id if omitted

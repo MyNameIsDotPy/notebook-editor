@@ -108,6 +108,7 @@ pub fn list(json: bool) -> Result<()> {
                     "display_name": record.display_name, "language": record.language,
                     "pid": record.pid, "port": record.port, "cwd": record.cwd,
                     "created_at": record.created_at, "alive": alive,
+                    "details": if *alive { session_client::control(record, json!({"cmd":"status"})).ok() } else { None },
                 })
             })
             .collect();
@@ -128,6 +129,22 @@ pub fn list(json: bool) -> Result<()> {
             record.pid
         );
     }
+    Ok(())
+}
+
+pub fn control(name: &str, command: &str, mut payload: Value) -> Result<Value> {
+    let dir = session_client::registry_dir()?;
+    let record =
+        session_client::find(&dir, name)?.with_context(|| format!("No session named '{name}'"))?;
+    payload["cmd"] = json!(command);
+    session_client::control(&record, payload)
+}
+
+pub fn print_control(name: &str, command: &str, payload: Value) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&control(name, command, payload)?)?
+    );
     Ok(())
 }
 
@@ -168,6 +185,16 @@ pub fn ensure_for_run(
     let dir = session_client::registry_dir()?;
     if let Some(record) = session_client::find(&dir, name)? {
         if session_client::is_alive(&record) {
+            if kernel.is_some_and(|k| k != record.kernel_label)
+                || interpreter.is_some()
+                || driver_python.is_some()
+                || !environment.is_empty()
+                || cwd.is_some_and(|c| {
+                    std::fs::canonicalize(c).ok() != std::fs::canonicalize(&record.cwd).ok()
+                })
+            {
+                bail!("Session already exists; kernel/interpreter/driver/environment options apply only at creation, and cwd must match the existing session");
+            }
             return Ok(record);
         }
         session_client::remove(&dir, &record.id)?;
@@ -268,10 +295,21 @@ fn spawn_and_register(
         let _ = reader.read_line(&mut line);
         let _ = tx.send(line);
     });
+    let stderr = child.stderr.take();
+    if let Some(mut stderr) = stderr {
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+        });
+    }
     let wait = Duration::from_secs(startup_timeout) + Duration::from_secs(15);
-    let line = rx
-        .recv_timeout(wait)
-        .map_err(|_| anyhow::anyhow!("Timed out waiting for the session kernel to start"))?;
+    let line = match rx.recv_timeout(wait) {
+        Ok(line) => line,
+        Err(_) => {
+            let _ = kill_pid(child.id());
+            let _ = child.wait();
+            bail!("Timed out waiting for the session kernel to start");
+        }
+    };
     if line.trim().is_empty() {
         let mut stderr_output = String::new();
         if let Some(mut stderr) = child.stderr.take() {
@@ -373,13 +411,42 @@ fn unique_id(dir: &Path) -> Result<String> {
     bail!("Could not allocate a unique session id")
 }
 
-fn kill_pid(pid: u32) -> Result<()> {
+pub(crate) fn kill_pid(pid: u32) -> Result<()> {
     #[cfg(unix)]
-    // The daemon owns a separate process group and the kernel is its child.
-    // Targeting the group prevents an orphaned kernel after a forced stop.
-    let status = Command::new("kill")
-        .args(["-KILL", &format!("-{pid}")])
-        .status();
+    let status = {
+        // Jupyter kernels create their own process groups. Enumerate descendants
+        // before killing their parent so forced cleanup reaches those groups too.
+        if let Ok(output) = Command::new("ps").args(["-eo", "pid=,ppid="]).output() {
+            let pairs: Vec<(u32, u32)> = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| {
+                    let mut fields = line.split_whitespace();
+                    Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
+                })
+                .collect();
+            let mut descendants = vec![pid];
+            let mut cursor = 0;
+            while cursor < descendants.len() {
+                for &(child, parent) in &pairs {
+                    if parent == descendants[cursor] && !descendants.contains(&child) {
+                        descendants.push(child);
+                    }
+                }
+                cursor += 1;
+            }
+            for child in descendants.into_iter().rev().filter(|child| *child != pid) {
+                let _ = Command::new("kill")
+                    .args(["-KILL", "--", &format!("-{child}")])
+                    .output();
+                let _ = Command::new("kill")
+                    .args(["-KILL", &child.to_string()])
+                    .output();
+            }
+        }
+        Command::new("kill")
+            .args(["-KILL", "--", &format!("-{pid}")])
+            .status()
+    };
     #[cfg(windows)]
     let status = Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])

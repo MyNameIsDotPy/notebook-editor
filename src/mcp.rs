@@ -1,4 +1,4 @@
-use crate::commands::{kernels, run, session};
+use crate::commands::{kernels, run, session, session_client};
 use crate::error::AppExit;
 use crate::notebook::{Cell, Notebook};
 use crate::output_limit;
@@ -14,7 +14,7 @@ const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 pub fn serve(root: &Path) -> Result<()> {
     let root = std::fs::canonicalize(root)
         .with_context(|| format!("Cannot access MCP workspace root '{}'", root.display()))?;
-    let server = McpServer { root };
+    let server = McpServer::new(&root)?;
     let stdin = std::io::stdin();
     let mut stdout = std::io::BufWriter::new(std::io::stdout().lock());
 
@@ -40,6 +40,7 @@ pub fn serve(root: &Path) -> Result<()> {
             write_message(&mut stdout, &response)?;
         }
     }
+    server.jobs.shutdown();
     Ok(())
 }
 
@@ -55,6 +56,7 @@ fn write_message(writer: &mut impl Write, value: &Value) -> Result<()> {
 /// tool result (`content`, `structuredContent`, `isError`).
 pub struct McpServer {
     root: PathBuf,
+    jobs: crate::execution_jobs::Jobs,
 }
 
 impl McpServer {
@@ -62,7 +64,10 @@ impl McpServer {
     pub fn new(root: &Path) -> Result<Self> {
         let root = std::fs::canonicalize(root)
             .with_context(|| format!("Cannot access MCP workspace root '{}'", root.display()))?;
-        Ok(McpServer { root })
+        Ok(McpServer {
+            root,
+            jobs: Default::default(),
+        })
     }
 
     /// Definitions advertised by `tools/list`.
@@ -144,6 +149,24 @@ impl McpServer {
             "notebook_session_start" => self.notebook_session_start(&arguments),
             "notebook_session_list" => self.notebook_session_list(&arguments),
             "notebook_session_stop" => self.notebook_session_stop(&arguments),
+            "notebook_execution_status" | "notebook_execution_cancel" => self.jobs.get(
+                required_str(&arguments, "execution_id")?,
+                arguments.get("after").and_then(Value::as_u64).unwrap_or(0),
+                name == "notebook_execution_cancel",
+            ),
+            "notebook_session_status"
+            | "notebook_session_interrupt"
+            | "notebook_session_restart"
+            | "notebook_session_configure"
+            | "notebook_session_result"
+            | "notebook_session_cancel" => {
+                let command = name.strip_prefix("notebook_session_").unwrap();
+                session::control(
+                    required_str(&arguments, "name")?,
+                    command,
+                    arguments.clone(),
+                )
+            }
             _ => bail!("Unknown tool '{name}'"),
         };
         Ok(match outcome {
@@ -633,6 +656,22 @@ impl McpServer {
     }
 
     fn notebook_run_cells(&self, args: &Value) -> Result<Value> {
+        if args
+            .get("background")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            self.notebook_path(args)?; // validate confinement before starting work
+            let worker = McpServer::new(&self.root)?;
+            let mut request = args.clone();
+            request["background"] = json!(false);
+            let id = self.jobs.start(move || {
+                worker
+                    .notebook_run_cells(&request)
+                    .unwrap_or_else(|e| json!({"status":"error", "message":format!("{e:#}")}))
+            })?;
+            return Ok(json!({"status":"running", "execution_id":id}));
+        }
         let path = self.notebook_path(args)?;
         let expression = args
             .get("selection")
@@ -641,7 +680,7 @@ impl McpServer {
         // Captured rather than propagated with `?`: a cell raising an error is the
         // single most common outcome an agent needs outputs for (the traceback),
         // so this must not short-circuit before the cells below are built.
-        let run_result = run::run(
+        let run_result = run::execute(
             path_str(&path)?,
             expression,
             args.get("timeout").and_then(Value::as_i64).unwrap_or(-1),
@@ -673,41 +712,30 @@ impl McpServer {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
         );
-        let nb = Notebook::from_file(path_str(&path)?)?;
-        let indices = selection::resolve(expression, nb.len())?;
+        let mut result = match run_result {
+            Ok(report) => serde_json::to_value(report)?,
+            Err(error) => {
+                let (status, message) = run_status(&Err(error));
+                json!({"status": status, "message": message, "cells": []})
+            }
+        };
         let max_lines = output_line_limit(args);
         let inclusion = output_inclusion(args);
-        let mut failed_cell = None;
-        let cells: Vec<Value> = indices
-            .into_iter()
-            .filter(|&i| nb.cells[i].cell_type == "code")
-            .map(|index| {
-                let outputs = &nb.cells[index].outputs;
-                if failed_cell.is_none() && output_limit::has_error(outputs) {
-                    failed_cell = Some(index + 1);
+        if let Some(cells) = result.get_mut("cells").and_then(Value::as_array_mut) {
+            for cell in cells {
+                let outputs = cell
+                    .get("outputs")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                if should_include_outputs(inclusion, &outputs) {
+                    cell["outputs"] = json!(output_limit::limit_outputs(&outputs, max_lines));
+                } else {
+                    cell.as_object_mut().unwrap().remove("outputs");
                 }
-                let mut entry = json!({
-                    "index": index + 1,
-                    "execution_count": nb.cells[index].execution_count,
-                });
-                if should_include_outputs(inclusion, outputs) {
-                    entry["outputs"] =
-                        Value::Array(output_limit::limit_outputs(outputs, max_lines));
-                }
-                entry
-            })
-            .collect();
-        let (status, message) = run_status(&run_result);
-        let mut result = json!({
-            "status": status, "path": relative_display(&self.root, &path), "cells": cells,
-            "session": args.get("session").and_then(Value::as_str),
-        });
-        if let Some(index) = failed_cell {
-            result["failed_cell"] = json!(index);
+            }
         }
-        if let Some(message) = message {
-            result["message"] = json!(message);
-        }
+        result["path"] = json!(relative_display(&self.root, &path));
         Ok(result)
     }
 
@@ -752,6 +780,7 @@ impl McpServer {
                     "display_name": record.display_name, "language": record.language,
                     "pid": record.pid, "cwd": record.cwd, "created_at": record.created_at,
                     "alive": alive,
+                    "details": if *alive { session_client::control(record, json!({"cmd":"status"})).ok() } else { None },
                 })
             })
             .collect();
@@ -798,6 +827,14 @@ fn tool_result(value: Value, is_error: bool) -> Value {
 
 fn tool_definitions() -> Vec<Value> {
     vec![
+        tool("notebook_execution_status", "Poll a background execution, its events, and final result", schema(&["execution_id"], json!({"execution_id":string_prop("Background execution ID"), "after":integer_prop("Return events after this sequence number")}))),
+        tool("notebook_execution_cancel", "Cancel a background execution and preserve available outputs", schema(&["execution_id"], json!({"execution_id":string_prop("Background execution ID")}))),
+        tool("notebook_session_result", "Retrieve retained daemon execution outputs and events, including after reconnecting", schema(&["name", "execution_id"], json!({"name":string_prop("Session name or ID"), "execution_id":string_prop("Daemon execution ID from session history or final report"), "after":integer_prop("Return events after this sequence")}))),
+        tool("notebook_session_cancel", "Cancel a queued or active daemon execution", schema(&["name", "execution_id"], json!({"name":string_prop("Session name or ID"), "execution_id":string_prop("Daemon execution ID")}))),
+        tool("notebook_session_status", "Inspect kernel health, active execution, queue, and bounded history", schema(&["name"], json!({"name":string_prop("Session name or ID")}))),
+        tool("notebook_session_interrupt", "Interrupt the active execution", schema(&["name"], json!({"name":string_prop("Session name or ID")}))),
+        tool("notebook_session_restart", "Restart an idle kernel, clearing variables and imports", schema(&["name"], json!({"name":string_prop("Session name or ID")}))),
+        tool("notebook_session_configure", "Set optional idle expiry; omit idle_timeout to disable", schema(&["name"], json!({"name":string_prop("Session name or ID"), "idle_timeout":integer_prop("Idle seconds before automatic shutdown")}))),
         tool(
             "notebook_info",
             "Summarize a notebook and its configured kernel",
@@ -880,7 +917,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "notebook_run_cells",
-            "Execute trusted notebook code through a Jupyter kernel and save outputs. Always returns 'status' ('ok', 'error', 'missing_dependency', 'overall_timeout', or 'interrupted') plus, on failure, 'message' and 'failed_cell' — outputs (including tracebacks) are returned regardless of status, so check 'failed_cell'/'status' rather than assuming a cell succeeded just because the call didn't throw",
+            "Execute trusted notebook code through a Jupyter kernel and save outputs. Returns precise 'status', current-run cell states and outputs, 'failed_cell', and 'message'. Use background=true to obtain an execution ID for polling/cancellation — outputs (including tracebacks) are returned regardless of status, so check 'failed_cell'/'status' rather than assuming a cell succeeded just because the call didn't throw",
             mutation_schema(
                 &["path"],
                 json!({
@@ -888,6 +925,7 @@ fn tool_definitions() -> Vec<Value> {
                     "kernel": string_prop("Kernelspec name or discovered kernel ID"), "interpreter": string_prop("Python kernel interpreter"),
                     "driver_python": string_prop("Explicit nbclient driver Python"), "timeout": integer_prop("Per-cell seconds; -1 disables"),
                     "overall_timeout": integer_prop("Overall execution seconds"), "allow_errors": bool_prop("Continue after cell errors"),
+                    "background": bool_prop("Return an execution ID immediately; poll notebook_execution_status and cancel with notebook_execution_cancel"),
                     "include_prior": bool_prop("Execute prior code cells as context"),
                     "session": string_prop("Run against a persistent kernel session (see notebook_session_start) instead of a one-shot kernel"),
                     "create_session": bool_prop("Create the session if it doesn't exist yet; only meaningful together with session"),
@@ -1286,6 +1324,7 @@ mod tests {
     fn server() -> (tempfile::TempDir, McpServer) {
         let dir = tempfile::tempdir().unwrap();
         let server = McpServer {
+            jobs: Default::default(),
             root: std::fs::canonicalize(dir.path()).unwrap(),
         };
         (dir, server)

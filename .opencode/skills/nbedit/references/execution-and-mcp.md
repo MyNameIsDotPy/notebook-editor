@@ -84,12 +84,26 @@ Reference a session from `run` with `--session <name>`:
   using the same `--kernel`/`--interpreter`/`--driver-python` resolution as a
   normal run.
 
-Sessions never expire on their own; `session list` detects and prunes dead
-entries from the registry, but a live kernel is only stopped by
-`session stop` (graceful shutdown over TCP, falling back to killing the PID;
-`--force` skips straight to killing the PID). Ctrl-C during a
-`run --session` call interrupts the CLI but does not interrupt the kernel —
-the cell keeps running in the daemon.
+Sessions serialize execution through one queue. Ctrl-C and overall timeouts
+cancel queued work or interrupt active work, with forced shutdown after a grace
+period. Recover unhealthy kernels with `session restart NAME` (requires an empty
+queue). Existing sessions reject creation-only driver/interpreter/environment
+options and conflicting kernel/cwd.
+
+```sh
+nbedit session status NAME
+nbedit session interrupt NAME
+nbedit session restart NAME
+nbedit session result NAME EXECUTION_ID --after 0
+nbedit session cancel NAME EXECUTION_ID
+nbedit session configure NAME --idle-timeout 600
+```
+
+Omit `--idle-timeout` to disable expiry (the default). History retains 32
+executions, with completed results on temporary disk; events retain up to 256
+entries / 1 MiB per execution. Results survive caller disconnection until evicted
+or the daemon stops. Session list reports health and history and prunes dead
+registry entries and synthetic specs.
 
 ## MCP server
 
@@ -127,3 +141,33 @@ calls until `notebook_session_stop`, so hold an active session to the same
 trust bar as execution itself. Kernel working directory for
 `notebook_session_start` always defaults to the notebook's directory (or the
 workspace root), never the MCP server process's own working directory.
+
+## Structured results and background execution
+
+CLI and MCP share execution reports. `requested_cells` is the requested selection;
+`executed_cells` contains only attempted cells, including prior context. Each
+`cells` entry has `index`, `context`, `state`, `execution_count`, and current-run
+outputs. Skipped cells never contribute stale errors. Context failures return
+their traceback. Statuses distinguish `ok_with_errors`, `cell_error`,
+`cell_timeout`, `kernel_error`, `driver_failure`, `overall_timeout`,
+`interrupted`, and `save_conflict`.
+
+Before saving, execution locks cooperating saves and compares original notebook
+bytes. A conflict returns results without overwriting edits. External editors can
+still race the final comparison/atomic replacement. Remove a crashed writer's
+stale `.ipynb.nbedit-lock` only once no writer is active.
+
+For MCP set `background: true` on `notebook_run_cells`, then poll
+`notebook_execution_status` with `execution_id` and optional `after` event cursor.
+Use `notebook_execution_cancel` to cancel. `first_sequence` detects event-buffer
+eviction; large event snapshots may be truncated. Final results are independent
+of event truncation. Handles live in the current MCP server instance (up to 32
+retained; completed reports on temporary disk). Session execution IDs in final
+reports can also be retrieved via the CLI.
+
+Additional MCP controls: `notebook_session_result`, `notebook_session_cancel`, `notebook_session_status`, `notebook_session_interrupt`,
+`notebook_session_restart`, `notebook_session_configure` (`idle_timeout` seconds,
+omit to disable). JSON CLI stdout remains a single final report.
+
+Sessions created by an older nbedit version must be stopped and started again
+to use protocol v2; restarting only their kernel does not upgrade the daemon.

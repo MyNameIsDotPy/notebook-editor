@@ -376,13 +376,15 @@ Important options:
 
 By default every `run` is stateless: a fresh kernel starts, executes the selection, and shuts down within the call. `--session` runs against a long-lived kernel started with `nbedit session start` instead, so variables and imports from one `run` are still there for the next. `--include-prior` and `--session` cannot be combined — with a session, prior state already lives in the kernel.
 
-`--json` reports `status`, `kernel`, `source`, `executed_cells`, `failed_cell`, `duration_ms`, and `outputs_saved`; when `--session` is used, it also includes `session` with the session's name, so scripts can confirm which one ran (including when `--create-session` created it on the fly).
+`--json` reports `status`, `kernel`, `source`, `requested_cells`, `executed_cells`, `failed_cell`, `duration_ms`, `outputs_saved`, `session`, `execution_id`, `message`, and `cells`. Each cell has its 1-based `index`, `context` flag, state (`completed`, `failed`, or `skipped`), execution count, and current-run outputs. `executed_cells` excludes skipped cells and includes executed prior context. Allowed errors produce `ok_with_errors`; cell errors, cell timeouts, and kernel failures remain distinct.
+
+Before saving, execution acquires a cooperating save lock and compares the original notebook bytes. A concurrent edit or busy lock produces `save_conflict`, returns execution results, and leaves the notebook untouched. `execution_status` preserves the kernel outcome even when saving conflicts. External editors can still race the final comparison and atomic replacement. A stale `.ipynb.nbedit-lock` left by a crashed writer requires removal after confirming no writer is active.
 
 The driver and kernel are separate processes: the driver needs `nbclient` and `nbformat`, while a Python kernel needs `ipykernel`. For Python kernels, `nbedit` automatically prefers the interpreter recorded in the selected kernelspec as the driver when it has the required packages. `--driver-python` is only an override. Registered non-Python kernels use their kernelspec launch command while `nbedit` discovers a suitable Python driver independently.
 
 Exit codes are `0` for completed execution (including allowed errors), `1` for execution or cell failure, `2` for missing driver dependencies, `124` for an overall timeout, and `130` for Ctrl-C. Available partial outputs are saved when the driver can shut down cleanly.
 
-Unless `--quiet` or `--json` is set, one-shot `run` (not `--session`) prints a `[nbedit] cell <N> (<i>/<total>): starting`/`...: done` line to stderr as each selected cell begins and finishes, where `<N>` is the cell's 1-based number in the notebook (matching `nbedit read`'s numbering) and `<i>/<total>` its position within this run. This is best-effort: it needs `nbclient`'s `on_cell_start`/`on_cell_complete` hooks (present since nbclient 0.6), and is silently omitted — never an error — on an older `nbclient`. `--session` execution has no equivalent yet; it still reports only the final result.
+Unless `--quiet` or `--json` is set, one-shot `run` (not `--session`) prints a `[nbedit] cell <N> (<i>/<total>): starting`/`...: done` line to stderr as each selected cell begins and finishes, where `<N>` is the cell's 1-based number in the notebook (matching `nbedit read`'s numbering) and `<i>/<total>` its position within this run. This is best-effort: it needs `nbclient`'s `on_cell_start`/`on_cell_complete` hooks (present since nbclient 0.6), and is silently omitted — never an error — on an older `nbclient`. `--session` also prints cell start/completion progress from daemon events.
 
 ---
 
@@ -435,7 +437,22 @@ nbedit session list
 nbedit session stop demo
 ```
 
-Sessions never expire on their own — `session list` detects and prunes dead entries from its registry, but a live kernel only stops via `session stop` (graceful shutdown, falling back to killing the process; `--force` skips straight to that). Session registry files live under an OS data directory (e.g. `~/.local/share/nbedit/sessions` on Linux), separate from the notebook and workspace.
+Additional controls:
+
+```sh
+nbedit session status demo
+nbedit session interrupt demo
+nbedit session restart demo
+nbedit session result demo EXECUTION_ID --after 0
+nbedit session cancel demo EXECUTION_ID
+nbedit session configure demo --idle-timeout 600
+```
+
+Each session serializes execution through one queue. `status` reports kernel health, active execution, queue length, last activity, and recent execution history. `result` retrieves outputs and events after a caller disconnects. The daemon retains up to 32 executions and 256 events / 1 MiB per execution, with completed outputs on temporary disk files. Results expire when evicted or the session stops; the kernel's variables remain until restart/stop. Reusing sessions rejects creation-only interpreter/driver/environment options and conflicting kernel/cwd overrides.
+
+Ctrl-C and overall deadlines cancel queued work or interrupt active execution. Available outputs are checkpointed; unresponsive kernels are forcibly stopped after a grace period. A per-cell timeout or kernel protocol failure also stops the session kernel to prevent later work from overlapping unfinished code. Recover an unhealthy session with `session restart`, which requires an empty queue. Session deadlines include queue waiting. One-shot deadlines start at driver launch, after environment/kernel discovery.
+
+Sessions have no expiry by default. Configure optional idle expiry with `session configure NAME --idle-timeout SECONDS`; omit the flag to disable. `session list` detects dead entries and removes registry records and synthetic kernelspecs. `session stop` requests graceful shutdown, falling back to process-tree termination; `--force` terminates directly. Registry files live under the OS data directory, separate from notebooks.
 
 ---
 
@@ -509,7 +526,11 @@ Notebooks are also exposed as `notebook:///{path}` resources. Paths are canonica
 
 `include_outputs` (both tools, default `true`) also accepts `"on_error"` instead of a boolean, to include outputs only for cells whose outputs contain an error — useful for a big notebook where only the failures matter. Large binary outputs (images, PDFs, ...) above ~2KB are replaced by default with `{"nbedit_omitted": true, "mime": ..., "bytes": ...}`, since raw base64 is pure noise as LLM context; `full_output: true` restores them.
 
-`notebook_run_cells` always returns a result — even when a cell raises an error, times out, or the kernel dies — instead of failing the tool call and discarding the outputs. Check the `status` field (`"ok"`, `"error"`, `"missing_dependency"`, `"overall_timeout"`, or `"interrupted"`) rather than assuming success; on failure, `message` explains what happened and `failed_cell` points at the first cell whose outputs contain an error, so the traceback is always one field away instead of requiring a follow-up `notebook_read` call.
+`notebook_run_cells` returns current-run outputs and precise statuses (`ok`, `ok_with_errors`, `cell_error`, `cell_timeout`, `kernel_error`, `missing_dependency`, `overall_timeout`, `interrupted`, `save_conflict`, or `driver_failure`). Setup/validation errors use `error`. `failed_cell` comes from execution, never stale saved outputs; prior context failures include their traceback.
+
+Pass `background: true` to return an execution ID immediately. Poll `notebook_execution_status` with that ID and optional `after` event cursor; the final report is in `result`. Use `notebook_execution_cancel` to cancel. Live events include bounded output/checkpoint snapshots; `first_sequence` identifies the earliest retained event. Final outputs are independent of event truncation. Handles last for the running MCP server instance (up to 32 retained, completed reports on temporary disk files); they do not survive server restart.
+
+Session controls: `notebook_session_result`, `notebook_session_cancel`, `notebook_session_status`, `notebook_session_interrupt`, `notebook_session_restart`, and `notebook_session_configure` (`idle_timeout` seconds, omit to disable).
 
 ---
 
@@ -581,7 +602,9 @@ src/
     kernels.rs         -- Kernel/environment discovery and ranking
     run.rs             -- Driver resolution and one-shot notebook execution
     session.rs         -- `session` subcommand: registry, daemon start/stop
-    session_client.rs  -- Session registry format, daemon script, TCP protocol
+    session_client.rs  -- Session registry format and TCP protocol
+    session_daemon.py  -- Embedded queued execution daemon
+  execution_jobs.rs    -- MCP background handles and bounded retention
     ...                -- Notebook reading and mutation commands
   error.rs         -- Application errors and exit codes
 ```
@@ -760,3 +783,18 @@ comments for the Spanish labels. Forbidden regex patterns inspect individual
 source lines, including comments and strings. Any finding produces a nonzero
 exit status. These new operations are CLI/library features; dedicated MCP tools
 are not yet exposed.
+
+## Execution integration tests
+
+After `cargo build`, use Python with `nbclient`, `nbformat`, and `ipykernel`:
+
+```sh
+python -m unittest discover -s tests -p test_execution.py -v
+```
+
+Tests use isolated kernelspecs/registries and cover execution reports, MCP
+background polling/cancellation, session queues/recovery, save conflicts,
+idle expiry, and orphan cleanup. CI runs them on Windows and Ubuntu.
+
+Sessions created by an older nbedit version must be stopped and started again
+to use protocol v2; restarting only their kernel does not upgrade the daemon.

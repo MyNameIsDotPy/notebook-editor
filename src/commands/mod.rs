@@ -426,7 +426,35 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             driver_python.as_deref(),
         ),
 
-        Command::Session { action } => match action {
+        Command::Session { action } => match *action {
+            SessionAction::Status { name } => {
+                session::print_control(&name, "status", serde_json::json!({}))
+            }
+            SessionAction::Interrupt { name } => {
+                session::print_control(&name, "interrupt", serde_json::json!({}))
+            }
+            SessionAction::Restart { name } => {
+                session::print_control(&name, "restart", serde_json::json!({}))
+            }
+            SessionAction::Result {
+                name,
+                execution_id,
+                after,
+            } => session::print_control(
+                &name,
+                "result",
+                serde_json::json!({"execution_id":execution_id, "after":after}),
+            ),
+            SessionAction::Cancel { name, execution_id } => session::print_control(
+                &name,
+                "cancel",
+                serde_json::json!({"execution_id":execution_id}),
+            ),
+            SessionAction::Configure { name, idle_timeout } => session::print_control(
+                &name,
+                "configure",
+                serde_json::json!({"idle_timeout":idle_timeout}),
+            ),
             SessionAction::Start {
                 name,
                 kernel,

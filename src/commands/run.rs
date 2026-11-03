@@ -12,20 +12,67 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+type EventObserver = Box<dyn Fn(&Value)>;
+thread_local! {
+    static OBSERVER: std::cell::RefCell<Option<EventObserver>> = std::cell::RefCell::new(None);
+    static CANCEL: std::cell::RefCell<Option<std::sync::Arc<AtomicBool>>> = const { std::cell::RefCell::new(None) };
+}
+pub fn observe_with(cancel: std::sync::Arc<AtomicBool>, observer: impl Fn(&Value) + 'static) {
+    CANCEL.with(|c| *c.borrow_mut() = Some(cancel));
+    OBSERVER.with(|o| *o.borrow_mut() = Some(Box::new(observer)));
+}
+fn emit(event: &Value) {
+    OBSERVER.with(|o| {
+        if let Some(f) = o.borrow().as_ref() {
+            f(event);
+        }
+    });
+}
+
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 static CTRL_C_HANDLER: OnceLock<std::result::Result<(), String>> = OnceLock::new();
 
-#[derive(Serialize)]
-struct ExecutionReport {
-    status: String,
-    kernel: String,
-    source: String,
-    executed_cells: Vec<usize>,
-    failed_cell: Option<usize>,
-    duration_ms: u128,
-    outputs_saved: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    session: Option<String>,
+#[derive(Debug, Serialize)]
+pub struct ExecutionReport {
+    pub status: String,
+    pub execution_status: String,
+    pub kernel: String,
+    pub source: String,
+    pub requested_cells: Vec<usize>,
+    pub executed_cells: Vec<usize>,
+    pub failed_cell: Option<usize>,
+    pub duration_ms: u128,
+    pub outputs_saved: bool,
+    pub session: Option<String>,
+    pub execution_id: Option<String>,
+    pub message: Option<String>,
+    pub cells: Vec<CellExecution>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CellExecution {
+    pub index: usize,
+    pub context: bool,
+    pub state: String,
+    pub execution_count: Value,
+    pub outputs: Vec<Value>,
+}
+
+impl ExecutionReport {
+    pub fn check(&self) -> Result<()> {
+        let code = match self.status.as_str() {
+            "ok" | "ok_with_errors" | "ready" => return Ok(()),
+            "missing_dependency" => 2,
+            "overall_timeout" => 124,
+            "interrupted" => 130,
+            _ => 1,
+        };
+        Err(AppExit::new(
+            code,
+            self.message.clone().unwrap_or_else(|| self.status.clone()),
+        )
+        .into())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -51,10 +98,142 @@ pub fn run(
     session: Option<&str>,
     create_session: bool,
 ) -> Result<()> {
+    let report = execute(
+        notebook,
+        selection,
+        timeout,
+        kernel,
+        interpreter,
+        driver_python,
+        allow_errors,
+        include_prior,
+        startup_timeout,
+        iopub_timeout,
+        record_timing,
+        overall_timeout,
+        cwd,
+        environment,
+        dry_run,
+        json,
+        backup,
+        quiet,
+        session,
+        create_session,
+    )?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else if report.outputs_saved && !quiet {
+        eprintln!("Outputs written to {notebook}");
+    }
+    report.check()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn execute(
+    notebook: &str,
+    selection: &str,
+    timeout: i64,
+    kernel: Option<&str>,
+    interpreter: Option<&str>,
+    driver_python: Option<&str>,
+    allow_errors: bool,
+    include_prior: bool,
+    startup_timeout: u64,
+    iopub_timeout: u64,
+    record_timing: bool,
+    overall_timeout: Option<u64>,
+    cwd: Option<&str>,
+    environment: &[String],
+    dry_run: bool,
+    json: bool,
+    backup: bool,
+    quiet: bool,
+    session: Option<&str>,
+    create_session: bool,
+) -> Result<ExecutionReport> {
+    execute_request(ExecutionRequest {
+        notebook,
+        selection,
+        timeout,
+        kernel,
+        interpreter,
+        driver_python,
+        allow_errors,
+        include_prior,
+        startup_timeout,
+        iopub_timeout,
+        record_timing,
+        overall_timeout,
+        cwd,
+        environment,
+        dry_run,
+        json,
+        backup,
+        quiet,
+        session,
+        create_session,
+    })
+}
+
+/// Shared execution options; presentation remains in the CLI/MCP adapters.
+#[derive(Debug)]
+pub struct ExecutionRequest<'a> {
+    pub notebook: &'a str,
+    pub selection: &'a str,
+    pub timeout: i64,
+    pub kernel: Option<&'a str>,
+    pub interpreter: Option<&'a str>,
+    pub driver_python: Option<&'a str>,
+    pub allow_errors: bool,
+    pub include_prior: bool,
+    pub startup_timeout: u64,
+    pub iopub_timeout: u64,
+    pub record_timing: bool,
+    pub overall_timeout: Option<u64>,
+    pub cwd: Option<&'a str>,
+    pub environment: &'a [String],
+    pub dry_run: bool,
+    pub json: bool,
+    pub backup: bool,
+    pub quiet: bool,
+    pub session: Option<&'a str>,
+    pub create_session: bool,
+}
+
+pub fn execute_request(request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
+    let ExecutionRequest {
+        notebook,
+        selection,
+        timeout,
+        kernel,
+        interpreter,
+        driver_python,
+        allow_errors,
+        include_prior,
+        startup_timeout,
+        iopub_timeout,
+        record_timing,
+        overall_timeout,
+        cwd,
+        environment,
+        dry_run,
+        json,
+        backup,
+        quiet,
+        session,
+        create_session,
+    } = request;
     if timeout < -1 {
         bail!("--timeout must be -1 or a non-negative number");
     }
-    let mut nb = Notebook::from_file(notebook)?;
+    if include_prior && session.is_some() {
+        bail!("--include-prior cannot be used with a session");
+    }
+    if create_session && session.is_none() {
+        bail!("--create-session requires a session");
+    }
+    let revision = std::fs::read(notebook)?;
+    let mut nb: Notebook = serde_json::from_slice(&revision)?;
     nb.ensure_cell_ids();
     let indices = selection::resolve(selection, nb.len())?;
     let code_indices: Vec<usize> = indices
@@ -69,17 +248,25 @@ pub fn run(
 
     if let Some(session_name) = session {
         if dry_run {
-            let report = serde_json::json!({
-                "status": "ready", "session": session_name,
-                "cells": code_indices.iter().map(|i| i + 1).collect::<Vec<_>>()
-            });
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
+            if !json && !quiet {
                 println!("Session: {session_name}");
                 println!("Would execute {} code cell(s)", code_indices.len());
             }
-            return Ok(());
+            return Ok(ExecutionReport {
+                status: "ready".into(),
+                execution_status: "ready".into(),
+                kernel: String::new(),
+                source: String::new(),
+                requested_cells: code_indices.iter().map(|i| i + 1).collect(),
+                executed_cells: vec![],
+                failed_cell: None,
+                duration_ms: 0,
+                outputs_saved: false,
+                session: session.map(str::to_owned),
+                execution_id: None,
+                message: None,
+                cells: vec![],
+            });
         }
         return run_session(
             &mut nb,
@@ -102,29 +289,37 @@ pub fn run(
             json,
             quiet,
             backup,
+            &revision,
         );
     }
 
     let candidate = kernels::resolve(&nb, notebook_path, kernel, interpreter, driver_python)?;
     if dry_run {
-        let report = serde_json::json!({
-            "status": "ready", "kernel": candidate.execution_label(),
-            "display_name": candidate.display_name, "source": candidate.source,
-            "interpreter": candidate.interpreter, "cells": code_indices.iter().map(|i| i + 1).collect::<Vec<_>>()
-        });
-        if json {
-            println!("{}", serde_json::to_string_pretty(&report)?);
-        } else {
+        if !json && !quiet {
             println!(
                 "Kernel: {} ({:?})",
                 candidate.display_name, candidate.source
             );
-            if let Some(path) = candidate.interpreter {
+            if let Some(path) = &candidate.interpreter {
                 println!("Interpreter: {}", path.display());
             }
             println!("Would execute {} code cell(s)", code_indices.len());
         }
-        return Ok(());
+        return Ok(ExecutionReport {
+            status: "ready".into(),
+            execution_status: "ready".into(),
+            kernel: candidate.execution_label().into(),
+            source: format!("{:?}", candidate.source),
+            requested_cells: code_indices.iter().map(|i| i + 1).collect(),
+            executed_cells: vec![],
+            failed_cell: None,
+            duration_ms: 0,
+            outputs_saved: false,
+            session: session.map(str::to_owned),
+            execution_id: None,
+            message: None,
+            cells: vec![],
+        });
     }
 
     let execution_indices: Vec<usize> = if include_prior {
@@ -207,21 +402,17 @@ pub fn run(
         command.env("JUPYTER_PATH", combined);
     }
     command.envs(env);
-    INTERRUPTED.store(false, Ordering::SeqCst);
-    CTRL_C_HANDLER
-        .get_or_init(|| {
-            ctrlc::set_handler(|| INTERRUPTED.store(true, Ordering::SeqCst))
-                .map_err(|error| error.to_string())
-        })
-        .as_ref()
-        .map_err(|error| anyhow::anyhow!("Cannot install Ctrl-C handler: {error}"))?;
-    let (status, wall_timed_out, interrupted) = wait_for_child(command, overall_timeout)
-        .with_context(|| format!("Failed to launch '{driver}'"))?;
+    prepare_interrupt()?;
+    let (_status, wall_timed_out, interrupted) =
+        wait_for_child(command, overall_timeout, &tmp_dir.path().join("cancel"))
+            .with_context(|| format!("Failed to launch '{driver}'"))?;
 
     let py_report: Value = std::fs::read(&report_path).ok()
         .and_then(|data| serde_json::from_slice(&data).ok())
         .unwrap_or_else(|| serde_json::json!({"status": if wall_timed_out {"overall_timeout"} else if interrupted {"interrupted"} else {"driver_failure"}}));
-    let py_status = if interrupted {
+    let py_status = if wall_timed_out {
+        "overall_timeout"
+    } else if interrupted {
         "interrupted"
     } else {
         py_report
@@ -234,7 +425,12 @@ pub fn run(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let mut outputs_saved = false;
-
+    let states = py_report
+        .get("states")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut cell_reports = Vec::new();
     if execution_started {
         let executed: Value = serde_json::from_slice(&std::fs::read(&tmp_nb)?)?;
         let executed_cells = executed
@@ -244,11 +440,40 @@ pub fn run(
         if executed_cells.len() != execution_indices.len() {
             bail!("Cell count mismatch after execution");
         }
+        for (slot, &index) in execution_indices.iter().enumerate() {
+            let ec = &executed_cells[slot];
+            let state = states
+                .get(slot)
+                .and_then(Value::as_str)
+                .unwrap_or("skipped");
+            cell_reports.push(CellExecution {
+                index: index + 1,
+                context: !code_indices.contains(&index),
+                state: state.into(),
+                execution_count: ec.get("execution_count").cloned().unwrap_or(Value::Null),
+                outputs: if state == "skipped" {
+                    vec![]
+                } else {
+                    ec.get("outputs")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default()
+                },
+            });
+        }
         for &nb_idx in &code_indices {
             let slot = execution_indices
                 .iter()
                 .position(|&i| i == nb_idx)
                 .context("Selected cell missing from execution result")?;
+            if states
+                .get(slot)
+                .and_then(Value::as_str)
+                .unwrap_or("skipped")
+                == "skipped"
+            {
+                continue;
+            }
             let ec = &executed_cells[slot];
             if let Some(outputs) = ec.get("outputs").and_then(Value::as_array) {
                 nb.cells[nb_idx].outputs = outputs.clone();
@@ -262,74 +487,72 @@ pub fn run(
                 nb.cells[nb_idx].id = Some(id.to_owned());
             }
         }
-        nb.save(notebook, backup)?;
-        outputs_saved = true;
+        outputs_saved = save_checked(&nb, notebook, backup, &revision)?;
     }
 
+    if cell_reports.is_empty() {
+        cell_reports = execution_indices
+            .iter()
+            .map(|&index| CellExecution {
+                index: index + 1,
+                context: !code_indices.contains(&index),
+                state: "skipped".into(),
+                execution_count: Value::Null,
+                outputs: vec![],
+            })
+            .collect();
+    }
     let failed_slot = py_report
         .get("failed_cell")
+        .or_else(|| {
+            if wall_timed_out || interrupted {
+                py_report.get("active_cell")
+            } else {
+                None
+            }
+        })
         .and_then(Value::as_u64)
         .map(|i| i as usize);
+    if wall_timed_out || interrupted {
+        for cell in &mut cell_reports {
+            if cell.state == "running" {
+                cell.state = "failed".into();
+            }
+        }
+    }
     let report = ExecutionReport {
         status: py_status.into(),
+        execution_status: py_status.into(),
         kernel: candidate.execution_label().into(),
         source: format!("{:?}", candidate.source),
-        executed_cells: code_indices.iter().map(|i| i + 1).collect(),
+        requested_cells: code_indices.iter().map(|i| i + 1).collect(),
+        executed_cells: cell_reports
+            .iter()
+            .filter(|c| c.state != "skipped" && c.state != "pending")
+            .map(|c| c.index)
+            .collect(),
         failed_cell: failed_slot.and_then(|slot| execution_indices.get(slot).map(|i| i + 1)),
         duration_ms: started.elapsed().as_millis(),
         outputs_saved,
         session: None,
+        execution_id: None,
+        message: if !outputs_saved && execution_started {
+            Some(
+                "Notebook changed during execution; results returned without overwriting it".into(),
+            )
+        } else {
+            py_report
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        },
+        cells: cell_reports,
     };
-    if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else if outputs_saved && !quiet {
-        eprintln!("Outputs written to {notebook}");
+    let mut report = report;
+    if !outputs_saved && execution_started {
+        report.status = "save_conflict".into();
     }
-
-    match py_status {
-        "ok" | "ok_with_errors" => Ok(()),
-        "missing_dependency" => Err(AppExit::new(
-            2,
-            py_report
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("nbclient/nbformat not installed"),
-        )
-        .into()),
-        "overall_timeout" => Err(AppExit::new(
-            124,
-            "Overall execution timeout expired; the kernel process was terminated",
-        )
-        .into()),
-        "interrupted" => {
-            Err(AppExit::new(130, "Execution interrupted (available outputs saved)").into())
-        }
-        "cell_error" => Err(AppExit::new(
-            1,
-            "One or more cells raised an error (available outputs saved)",
-        )
-        .into()),
-        "cell_timeout" => {
-            Err(AppExit::new(1, "Cell execution timed out (available outputs saved)").into())
-        }
-        "kernel_error" => Err(AppExit::new(
-            1,
-            py_report
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("Kernel execution failed"),
-        )
-        .into()),
-        _ if !status.success() => Err(AppExit::new(
-            1,
-            py_report
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("Execution driver failed"),
-        )
-        .into()),
-        _ => Ok(()),
-    }
+    Ok(report)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -354,7 +577,16 @@ fn run_session(
     json: bool,
     quiet: bool,
     backup: bool,
-) -> Result<()> {
+    revision: &[u8],
+) -> Result<ExecutionReport> {
+    let creation_cwd = kernels::parent_or_current(notebook_path).to_string_lossy();
+    let cwd = cwd.or_else(|| {
+        if create_session {
+            Some(creation_cwd.as_ref())
+        } else {
+            None
+        }
+    });
     let record = session::ensure_for_run(
         session_name,
         create_session,
@@ -393,7 +625,7 @@ fn run_session(
         .collect();
 
     let started = Instant::now();
-    let response = session_client::execute(
+    let response = session_client::execute_observed(
         &record,
         &cells,
         allow_errors,
@@ -401,6 +633,19 @@ fn run_session(
         record_timing,
         overall_timeout,
         iopub_timeout,
+        |event| {
+            emit(event);
+            if !quiet && !json {
+                if let Some(kind @ ("cell_started" | "cell_completed")) =
+                    event.get("type").and_then(Value::as_str)
+                {
+                    let id = event.get("id").and_then(Value::as_str).unwrap_or("");
+                    if let Some(index) = id_to_index.get(id) {
+                        eprintln!("[nbedit] cell {}: {}", index + 1, kind);
+                    }
+                }
+            }
+        },
     )
     .map_err(|error| {
         let code = if error
@@ -419,6 +664,9 @@ fn run_session(
 
     let mut outputs_saved = false;
     for result in &response.results {
+        if result.state == "skipped" {
+            continue;
+        }
         if let Some(&nb_idx) = id_to_index.get(result.id.as_str()) {
             nb.cells[nb_idx].outputs = result.outputs.clone();
             nb.cells[nb_idx].execution_count = Some(result.execution_count.clone());
@@ -426,82 +674,143 @@ fn run_session(
         }
     }
     if !response.results.is_empty() {
-        nb.save(notebook, backup)?;
-        outputs_saved = true;
+        outputs_saved = save_checked(nb, notebook, backup, revision)?;
     }
 
     let failed_slot = response
         .failed_id
         .as_deref()
         .and_then(|id| id_to_index.get(id).copied());
+    let cell_reports: Vec<_> = code_indices
+        .iter()
+        .map(|&index| {
+            let result = response
+                .results
+                .iter()
+                .find(|r| id_to_index.get(&r.id) == Some(&index));
+            CellExecution {
+                index: index + 1,
+                context: false,
+                state: result
+                    .map(|r| r.state.clone())
+                    .unwrap_or_else(|| "skipped".into()),
+                execution_count: result
+                    .map(|r| r.execution_count.clone())
+                    .unwrap_or(Value::Null),
+                outputs: result.map(|r| r.outputs.clone()).unwrap_or_default(),
+            }
+        })
+        .collect();
     let report = ExecutionReport {
         status: response.status.clone(),
+        execution_status: response.status.clone(),
         kernel: record.kernel_label.clone(),
         source: "Session".into(),
-        executed_cells: code_indices.iter().map(|i| i + 1).collect(),
+        requested_cells: code_indices.iter().map(|i| i + 1).collect(),
+        executed_cells: cell_reports
+            .iter()
+            .filter(|c| c.state != "skipped")
+            .map(|c| c.index)
+            .collect(),
         failed_cell: failed_slot.map(|i| i + 1),
         duration_ms: started.elapsed().as_millis(),
         outputs_saved,
         session: Some(record.name.clone()),
+        execution_id: response.execution_id.clone(),
+        message: response.message.clone(),
+        cells: cell_reports,
     };
-    if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else if outputs_saved && !quiet {
-        eprintln!("Outputs written to {notebook}");
+    let mut report = report;
+    if !outputs_saved && !response.results.is_empty() {
+        report.status = "save_conflict".into();
+        report.message = Some(
+            "Notebook changed during execution; retrieve results with the execution ID".into(),
+        );
     }
+    Ok(report)
+}
 
-    match response.status.as_str() {
-        "ok" | "ok_with_errors" => Ok(()),
-        "cell_error" => Err(AppExit::new(
-            1,
-            "One or more cells raised an error (available outputs saved)",
-        )
-        .into()),
-        "cell_timeout" => {
-            Err(AppExit::new(1, "Cell execution timed out (available outputs saved)").into())
-        }
-        "kernel_error" => Err(AppExit::new(
-            1,
-            response
-                .message
-                .clone()
-                .unwrap_or_else(|| "Kernel execution failed".into()),
-        )
-        .into()),
-        other => Err(AppExit::new(
-            1,
-            response
-                .message
-                .clone()
-                .unwrap_or_else(|| format!("Session execution failed with status '{other}'")),
-        )
-        .into()),
-    }
+/// Cooperating executions serialize the compare-and-save operation. External
+/// editors are detected by a byte-for-byte revision check immediately before save.
+fn save_checked(nb: &Notebook, notebook: &str, backup: bool, revision: &[u8]) -> Result<bool> {
+    nb.save_if_unchanged(notebook, backup, revision)
+}
+
+pub(crate) fn prepare_interrupt() -> Result<()> {
+    INTERRUPTED.store(false, Ordering::SeqCst);
+    CTRL_C_HANDLER
+        .get_or_init(|| {
+            ctrlc::set_handler(|| INTERRUPTED.store(true, Ordering::SeqCst))
+                .map_err(|e| e.to_string())
+        })
+        .as_ref()
+        .map_err(|e| anyhow::anyhow!("Cannot install Ctrl-C handler: {e}"))?;
+    Ok(())
+}
+pub(crate) fn interrupted() -> bool {
+    INTERRUPTED.load(Ordering::SeqCst)
+        || CANCEL.with(|c| {
+            c.borrow()
+                .as_ref()
+                .is_some_and(|v| v.load(Ordering::SeqCst))
+        })
 }
 
 fn wait_for_child(
     mut command: Command,
     timeout: Option<u64>,
+    cancel_path: &Path,
 ) -> std::io::Result<(ExitStatus, bool, bool)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x00000200);
+    }
     let mut child = command.spawn()?;
     let started = Instant::now();
     let mut interrupted_at = None;
+    let mut wall_timed_out = false;
+    let mut previous_report = Vec::new();
     loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok((status, false, interrupted_at.is_some()));
+        if let Some(parent) = cancel_path.parent() {
+            if let Ok(bytes) = std::fs::read(parent.join("report.json")) {
+                if bytes != previous_report {
+                    if let Ok(report) = serde_json::from_slice::<Value>(&bytes) {
+                        emit(&serde_json::json!({"type":"checkpoint", "report": report}));
+                        previous_report = bytes;
+                    }
+                }
+            }
         }
-        if INTERRUPTED.load(Ordering::SeqCst) && interrupted_at.is_none() {
+        if let Some(status) = child.try_wait()? {
+            return Ok((
+                status,
+                wall_timed_out,
+                interrupted_at.is_some() && !wall_timed_out,
+            ));
+        }
+        if interrupted() && interrupted_at.is_none() {
             // The terminal delivers Ctrl-C to the whole foreground process group,
             // including the Python driver. Give its finally blocks time to write.
             interrupted_at = Some(Instant::now());
+            std::fs::write(cancel_path, "interrupted")?;
         }
         if interrupted_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(5)) {
-            child.kill()?;
-            return Ok((child.wait()?, false, true));
+            let _ = session::kill_pid(child.id());
+            let _ = child.kill();
+            return Ok((child.wait()?, wall_timed_out, !wall_timed_out));
         }
-        if timeout.is_some_and(|seconds| started.elapsed() >= Duration::from_secs(seconds)) {
-            child.kill()?;
-            return Ok((child.wait()?, true, false));
+        if interrupted_at.is_none()
+            && timeout.is_some_and(|seconds| started.elapsed() >= Duration::from_secs(seconds))
+        {
+            wall_timed_out = true;
+            interrupted_at = Some(Instant::now());
+            std::fs::write(cancel_path, "overall_timeout")?;
         }
         std::thread::sleep(Duration::from_millis(25));
     }
@@ -668,13 +977,42 @@ fn build_script(
     } else {
         vec![]
     };
+    let tracking_hooks = vec![
+        "        states = ['skipped'] * len(nb.cells)".to_string(),
+        "        result['states'] = states".to_string(),
+        "        for c in nb.cells: c.outputs = []; c.execution_count = None".to_string(),
+
+        "        def checkpoint():".to_string(),
+        "            active = result.get('active_cell')".to_string(),
+        "            if active is not None: result['active_outputs'] = nb.cells[active].get('outputs', [])".to_string(),
+        format!("            with open({path_repr} + '.next', 'w', encoding='utf-8') as f: nbformat.write(nb, f)"),
+        format!("            os.replace({path_repr} + '.next', {path_repr})"),
+        "            with open(report_path, 'w', encoding='utf-8') as f: json.dump(result, f)".to_string(),
+        "        def track_start(cell=None, cell_index=None, **kw):".to_string(),
+        "            states[cell_index] = 'running'".to_string(),
+        "            result['active_cell'] = cell_index".to_string(),
+        "            cell.outputs = []; cell.execution_count = None".to_string(),
+        "            checkpoint()".to_string(),
+
+        "        def track_done(cell=None, cell_index=None, **kw):".to_string(),
+        "            states[cell_index] = 'failed' if any(o.get('output_type') == 'error' for o in cell.get('outputs', [])) else 'completed'".to_string(),
+        "            checkpoint()".to_string(),
+        "        client.on_cell_execute = track_start".to_string(),
+        "        client.on_cell_executed = track_done".to_string(),
+        "        original_process_message = client.process_message".to_string(),
+        "        def process_message(msg, cell, cell_index):".to_string(),
+        "            value = original_process_message(msg, cell, cell_index)".to_string(),
+        "            checkpoint()".to_string(),
+        "            return value".to_string(),
+        "        client.process_message = process_message".to_string(),
+    ];
     let lines = [vec![
-        "import json, sys, traceback".to_string(),
+        "import json, sys, traceback, os, asyncio, time".to_string(),
         "if sys.platform == 'win32':".to_string(),
         "    import asyncio".to_string(),
         "    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())".to_string(),
         format!("report_path = {report_repr}"),
-        "result = {'status': 'driver_failure', 'execution_started': False}".to_string(),
+        format!("result = {{'status': 'driver_failure', 'execution_started': False, 'cell_numbers': {cell_numbers_repr}}}"),
         "nb = None".to_string(),
         "try:".to_string(),
         "    import nbformat, nbclient".to_string(),
@@ -684,18 +1022,37 @@ fn build_script(
         "    try:".to_string(),
         format!("        nb = nbformat.read(open({path_repr}, encoding='utf-8'), as_version=4)"),
         format!("        client = nbclient.NotebookClient(nb, timeout={timeout}, kernel_name={kernel_repr}, allow_errors={allow_errors}, startup_timeout={startup_timeout}, iopub_timeout={iopub_timeout}, record_timing={record_timing})"),
-    ], progress_hooks, vec![
+    ], progress_hooks, tracking_hooks, vec![
         "        result['execution_started'] = True".to_string(),
-        "        client.execute()".to_string(),
+        "        async def execute_with_cancel():".to_string(),
+        "            task = asyncio.create_task(client.async_execute())".to_string(),
+        format!("            marker = os.path.join(os.path.dirname({report_repr}), 'cancel')"),
+        "            try:".to_string(),
+        "                while not task.done():".to_string(),
+        "                    await asyncio.wait({task}, timeout=0.05)".to_string(),
+        "                    if os.path.exists(marker):".to_string(),
+        "                        if client.km and client.km.has_kernel: await client.km.interrupt_kernel()".to_string(),
+        "                        try: await asyncio.wait_for(asyncio.shield(task), timeout=3)".to_string(),
+        "                        except BaseException:".to_string(),
+        "                            if client.km and client.km.has_kernel: await client.km.shutdown_kernel(now=True)".to_string(),
+        "                        break".to_string(),
+        "                if task.done(): await task".to_string(),
+        "            finally:".to_string(),
+        "                if not task.done():".to_string(),
+        "                    task.cancel()".to_string(),
+        "                    try: await task".to_string(),
+        "                    except BaseException: pass".to_string(),
+        "        asyncio.run(execute_with_cancel())".to_string(),
         "        failures = [(i, o) for i, c in enumerate(nb.cells) for o in c.get('outputs', []) if o.get('output_type') == 'error']".to_string(),
-        "        result = {'status': 'ok_with_errors' if failures else 'ok', 'execution_started': True}".to_string(),
+        "        result.update(status='ok_with_errors' if failures else 'ok', execution_started=True)".to_string(),
         "        if failures: result['failed_cell'] = failures[0][0]".to_string(),
         "    except BaseException as e:".to_string(),
         "        name = type(e).__name__".to_string(),
         "        status = 'cell_timeout' if 'Timeout' in name else ('cell_error' if name == 'CellExecutionError' else 'kernel_error')".to_string(),
-        "        result = {'status': status, 'execution_started': result.get('execution_started', False), 'message': f'{name}: {e}'}".to_string(),
+        "        result.update(status=status, message=f'{name}: {e}')".to_string(),
+        "        if result.get('active_cell') is not None: result['failed_cell'] = result['active_cell']; result['states'][result['active_cell']] = 'failed'".to_string(),
         "        for i, cell in enumerate(nb.cells if nb else []):".to_string(),
-        "            if any(o.get('output_type') == 'error' for o in cell.get('outputs', [])): result['failed_cell'] = i; break".to_string(),
+        "            if 'failed_cell' not in result and any(o.get('output_type') == 'error' for o in cell.get('outputs', [])): result['failed_cell'] = i; break".to_string(),
         "    finally:".to_string(),
         "        if nb is not None:".to_string(),
         format!("            nbformat.write(nb, open({path_repr}, 'w', encoding='utf-8'))"),
@@ -712,15 +1069,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn changed_notebook_is_not_overwritten_or_backed_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.ipynb");
+        let original = br#"{"nbformat":4,"nbformat_minor":5,"metadata":{},"cells":[]}"#;
+        std::fs::write(&path, original).unwrap();
+        let nb: Notebook = serde_json::from_slice(original).unwrap();
+        std::fs::write(&path, b"external edit").unwrap();
+        assert!(!save_checked(&nb, path.to_str().unwrap(), true, original).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), b"external edit");
+        assert!(!path.with_extension("ipynb.nbedit-lock").exists());
+        assert!(!path.with_extension("ipynb.bak").exists());
+    }
+
+    #[test]
+    fn busy_save_lock_retains_results_without_removing_another_writers_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.ipynb");
+        let original = br#"{"nbformat":4,"nbformat_minor":5,"metadata":{},"cells":[]}"#;
+        std::fs::write(&path, original).unwrap();
+        let lock = path.with_extension("ipynb.nbedit-lock");
+        std::fs::write(&lock, b"busy").unwrap();
+        let nb: Notebook = serde_json::from_slice(original).unwrap();
+        assert!(!save_checked(&nb, path.to_str().unwrap(), false, original).unwrap());
+        assert_eq!(std::fs::read(lock).unwrap(), b"busy");
+        assert_eq!(std::fs::read(path).unwrap(), original);
+    }
+
+    #[test]
     fn generated_script_has_finally_persistence() {
-        let script = build_script("nb.ipynb", "report.json", 60, "python3", false, 60, 4, true, &[], false);
+        let script = build_script(
+            "nb.ipynb",
+            "report.json",
+            60,
+            "python3",
+            false,
+            60,
+            4,
+            true,
+            &[],
+            false,
+        );
         assert!(script.contains("finally:\n        if nb is not None:"));
         assert!(script.contains("json.dump(result, f)"));
     }
 
     #[test]
     fn no_limit_maps_to_python_none() {
-        let script = build_script("nb.ipynb", "report.json", -1, "python3", false, 60, 4, true, &[], false);
+        let script = build_script(
+            "nb.ipynb",
+            "report.json",
+            -1,
+            "python3",
+            false,
+            60,
+            4,
+            true,
+            &[],
+            false,
+        );
         assert!(script.contains("timeout=None"));
     }
 
@@ -738,7 +1145,18 @@ mod tests {
         // verbose=true here so the progress-hook branch (the newest, riskiest code) is
         // exercised by the real interpreter, not just the quiet/json-suppressed path.
         for verbose in [false, true] {
-            let script = build_script("nb.ipynb", "report.json", 60, "python3", false, 60, 4, true, &[2, 4], verbose);
+            let script = build_script(
+                "nb.ipynb",
+                "report.json",
+                60,
+                "python3",
+                false,
+                60,
+                4,
+                true,
+                &[2, 4],
+                verbose,
+            );
             let output = Command::new(python)
                 .arg("-c")
                 .arg(format!("compile({script:?}, '<test>', 'exec')"))
@@ -754,8 +1172,21 @@ mod tests {
 
     #[test]
     fn verbose_emits_progress_hooks_with_one_based_original_cell_numbers() {
-        let script = build_script("nb.ipynb", "report.json", 60, "python3", false, 60, 4, true, &[3, 4], true);
-        assert!(script.contains("_nbedit_cells = [4,5]") || script.contains("_nbedit_cells = [4, 5]"));
+        let script = build_script(
+            "nb.ipynb",
+            "report.json",
+            60,
+            "python3",
+            false,
+            60,
+            4,
+            true,
+            &[3, 4],
+            true,
+        );
+        assert!(
+            script.contains("_nbedit_cells = [4,5]") || script.contains("_nbedit_cells = [4, 5]")
+        );
         assert!(script.contains("client.on_cell_start = _nbedit_cell_start"));
         assert!(script.contains("client.on_cell_complete = _nbedit_cell_complete"));
         // Guarded so an nbclient too old to have these Callable traitlets loses the progress
@@ -768,8 +1199,19 @@ mod tests {
 
     #[test]
     fn quiet_or_json_omits_progress_hooks_entirely() {
-        let script = build_script("nb.ipynb", "report.json", 60, "python3", false, 60, 4, true, &[0], false);
-        assert!(!script.contains("on_cell_start"));
+        let script = build_script(
+            "nb.ipynb",
+            "report.json",
+            60,
+            "python3",
+            false,
+            60,
+            4,
+            true,
+            &[0],
+            false,
+        );
+        assert!(!script.contains("client.on_cell_start = _nbedit_cell_start"));
         assert!(!script.contains("_nbedit_cell"));
     }
 
@@ -782,7 +1224,18 @@ mod tests {
 
     #[test]
     fn windows_driver_uses_selector_event_loop_policy() {
-        let script = build_script("nb.ipynb", "report.json", 60, "python3", false, 60, 4, true, &[], false);
+        let script = build_script(
+            "nb.ipynb",
+            "report.json",
+            60,
+            "python3",
+            false,
+            60,
+            4,
+            true,
+            &[],
+            false,
+        );
         assert!(script.contains("WindowsSelectorEventLoopPolicy"));
         assert!(
             script.find("WindowsSelectorEventLoopPolicy").unwrap()

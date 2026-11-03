@@ -247,6 +247,45 @@ pub enum CellSource {
     Single(String),
 }
 
+/// Cross-command lock protecting comparison, backup, and atomic replacement.
+struct SaveLock(std::path::PathBuf);
+impl SaveLock {
+    fn acquire(path: &str) -> Result<Option<Self>> {
+        let target = Path::new(path);
+        let resolved = if target.exists() {
+            std::fs::canonicalize(target)?
+        } else {
+            let parent = target
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            std::fs::canonicalize(parent)?.join(
+                target
+                    .file_name()
+                    .context("Notebook path needs a file name")?,
+            )
+        };
+        let lock = resolved.with_extension("ipynb.nbedit-lock");
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock)
+        {
+            Ok(file) => {
+                drop(file);
+                Ok(Some(Self(lock)))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+            Err(error) => Err(error).context("Cannot acquire notebook save lock"),
+        }
+    }
+}
+impl Drop for SaveLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 impl Notebook {
     /// Read a notebook from disk.
     pub fn from_file(path: &str) -> Result<Self> {
@@ -259,6 +298,26 @@ impl Notebook {
 
     /// Write the notebook back to disk, optionally creating a .bak first.
     pub fn save(&self, path: &str, backup: bool) -> Result<()> {
+        let _lock = SaveLock::acquire(path)?.context(
+            "Notebook is being saved by another writer (or a stale .nbedit-lock exists)",
+        )?;
+        self.save_atomic(path, backup)
+    }
+
+    /// The execution variant of save: compare the loaded revision while holding
+    /// the same lock used by every other mutating command.
+    pub fn save_if_unchanged(&self, path: &str, backup: bool, revision: &[u8]) -> Result<bool> {
+        let Some(_lock) = SaveLock::acquire(path)? else {
+            return Ok(false);
+        };
+        if std::fs::read(path)? != revision {
+            return Ok(false);
+        }
+        self.save_atomic(path, backup)?;
+        Ok(true)
+    }
+
+    fn save_atomic(&self, path: &str, backup: bool) -> Result<()> {
         if backup && Path::new(path).exists() {
             let bak = format!("{path}.bak");
             std::fs::copy(path, &bak).with_context(|| format!("Cannot write backup '{bak}'"))?;
